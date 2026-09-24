@@ -26,6 +26,7 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "nvs.h"
 #include "psram_allocator.h"
 
 namespace {
@@ -79,6 +80,32 @@ bool s_power_menu = false;
 std::atomic<bool> s_power_short_pending{false};
 std::atomic<bool> s_power_long_pending{false};
 int64_t s_recording_started_us = 0;
+
+enum class UiMode : uint8_t { kChat = 0, kRead = 1 };
+enum class MicState : uint8_t { kIdle, kRecording, kProcessing };
+enum class UiMenu : uint8_t { kNone, kChat, kClearConfirm, kReader };
+
+struct ChatMessage {
+    bool user = false;
+    std::string text;
+};
+
+UiMode s_ui_mode = UiMode::kChat;
+MicState s_mic_state = MicState::kIdle;
+UiMenu s_ui_menu = UiMenu::kNone;
+std::vector<ChatMessage> s_chat_messages;
+std::string s_previous_response_id;
+int s_chat_scroll_offset = 0;
+int s_menu_index = 0;
+bool s_reader_in_book = false;
+int s_reader_page = 0;
+int s_reader_page_turns = 0;
+bool s_swap_notice = false;
+
+constexpr int64_t kModeSwapNoticeUs = 1500000;
+constexpr int64_t kModeSwapCommitUs = 3000000;
+constexpr int kReaderFullRefreshEveryPages = 10;
+constexpr int kChatVisibleMessages = 4;
 
 struct CaptureStats {
     uint32_t samples = 0;
@@ -509,6 +536,318 @@ void DrawWrappedText(uint8_t* fb, int x, int y, const std::string& input,
     }
 }
 
+
+void DrawOutlineRect(uint8_t* fb, int x, int y, int w, int h, int thickness = 2)
+{
+    FillRect(fb, x, y, w, thickness, true);
+    FillRect(fb, x, y + h - thickness, w, thickness, true);
+    FillRect(fb, x, y, thickness, h, true);
+    FillRect(fb, x + w - thickness, y, thickness, h, true);
+}
+
+void LoadUiState()
+{
+    nvs_handle_t handle = 0;
+    if (nvs_open("ui_state", NVS_READONLY, &handle) != ESP_OK) return;
+
+    uint8_t mode = 0;
+    if (nvs_get_u8(handle, "mode", &mode) == ESP_OK) {
+        s_ui_mode = mode == 1 ? UiMode::kRead : UiMode::kChat;
+    }
+    int32_t scroll = 0;
+    if (nvs_get_i32(handle, "chat_scroll", &scroll) == ESP_OK) {
+        s_chat_scroll_offset = std::max(0, static_cast<int>(scroll));
+    }
+    int32_t page = 0;
+    if (nvs_get_i32(handle, "reader_page", &page) == ESP_OK) {
+        s_reader_page = std::max(0, static_cast<int>(page));
+    }
+
+    auto load_string = [&](const char* key) -> std::string {
+        size_t len = 0;
+        if (nvs_get_str(handle, key, nullptr, &len) != ESP_OK || len <= 1) return {};
+        std::string value(len, '\0');
+        if (nvs_get_str(handle, key, value.data(), &len) != ESP_OK) return {};
+        if (!value.empty() && value.back() == '\0') value.pop_back();
+        return value;
+    };
+
+    s_previous_response_id = load_string("response_id");
+    const std::string last_user = load_string("last_user");
+    const std::string last_ai = load_string("last_ai");
+    if (!last_user.empty()) s_chat_messages.push_back({true, last_user});
+    if (!last_ai.empty()) s_chat_messages.push_back({false, last_ai});
+    nvs_close(handle);
+}
+
+void SaveUiState()
+{
+    nvs_handle_t handle = 0;
+    if (nvs_open("ui_state", NVS_READWRITE, &handle) != ESP_OK) return;
+    nvs_set_u8(handle, "mode", s_ui_mode == UiMode::kRead ? 1 : 0);
+    nvs_set_i32(handle, "chat_scroll", s_chat_scroll_offset);
+    nvs_set_i32(handle, "reader_page", s_reader_page);
+    nvs_set_str(handle, "response_id", s_previous_response_id.c_str());
+
+    std::string last_user;
+    std::string last_ai;
+    for (auto it = s_chat_messages.rbegin(); it != s_chat_messages.rend(); ++it) {
+        if (it->user && last_user.empty()) last_user = it->text;
+        if (!it->user && last_ai.empty()) last_ai = it->text;
+        if (!last_user.empty() && !last_ai.empty()) break;
+    }
+    nvs_set_str(handle, "last_user", last_user.c_str());
+    nvs_set_str(handle, "last_ai", last_ai.c_str());
+    nvs_commit(handle);
+    nvs_close(handle);
+}
+
+void ClearChat()
+{
+    s_chat_messages.clear();
+    s_previous_response_id.clear();
+    s_chat_scroll_offset = 0;
+    SaveUiState();
+}
+
+void DrawTab(uint8_t* fb, int x, const char* label, bool selected)
+{
+    DrawOutlineRect(fb, x, 24, 82, 48, selected ? 4 : 2);
+    DrawText(fb, x + 14, 38, label, 2);
+    if (selected) FillRect(fb, x + 8, 66, 66, 4, true);
+}
+
+void DrawTopBar(uint8_t* fb)
+{
+    DrawText(fb, 20, 36, "CLANKER POCKET", 2);
+    DrawTab(fb, 286, "CHAT", s_ui_mode == UiMode::kChat);
+    DrawTab(fb, 378, "READ", s_ui_mode == UiMode::kRead);
+    FillRect(fb, 18, 92, kPortraitWidth - 36, 3, true);
+}
+
+void DrawMicIcon(uint8_t* fb)
+{
+    const int x = 232;
+    const int y = 724;
+    if (s_mic_state == MicState::kRecording) {
+        FillRect(fb, x, y, 16, 24, true);
+    } else {
+        DrawOutlineRect(fb, x, y, 16, 24, 2);
+    }
+    FillRect(fb, x - 5, y + 18, 5, 10, true);
+    FillRect(fb, x + 16, y + 18, 5, 10, true);
+    FillRect(fb, x, y + 28, 16, 2, true);
+    FillRect(fb, x + 7, y + 30, 2, 8, true);
+    FillRect(fb, x + 1, y + 38, 14, 2, true);
+
+    if (s_mic_state == MicState::kProcessing) {
+        FillRect(fb, x + 32, y + 10, 4, 4, true);
+        FillRect(fb, x + 42, y + 10, 4, 4, true);
+        FillRect(fb, x + 52, y + 10, 4, 4, true);
+    }
+}
+
+void DrawChatMessage(uint8_t* fb, int y, const ChatMessage& msg)
+{
+    const int x = msg.user ? 158 : 24;
+    const int w = 298;
+    DrawOutlineRect(fb, x, y, w, 124, 2);
+    DrawText(fb, x + 12, y + 10, msg.user ? "YOU" : "CLANKER", 2);
+    DrawWrappedText(fb, x + 12, y + 42, msg.text, 2, 22, 3);
+}
+
+void DrawChatBody(uint8_t* fb)
+{
+    if (s_chat_messages.empty()) {
+        DrawText(fb, 104, 300, "HOLD BOOT TO TALK", 3);
+        DrawText(fb, 91, 355, "UP DOWN SCROLL CHAT", 2);
+    } else {
+        const int total = static_cast<int>(s_chat_messages.size());
+        const int max_offset = std::max(0, total - 1);
+        s_chat_scroll_offset = std::clamp(s_chat_scroll_offset, 0, max_offset);
+        const int end = std::max(0, total - s_chat_scroll_offset);
+        const int start = std::max(0, end - kChatVisibleMessages);
+        int y = 112;
+        for (int i = start; i < end && y + 124 <= 688; ++i) {
+            DrawChatMessage(fb, y, s_chat_messages[static_cast<size_t>(i)]);
+            y += 136;
+        }
+    }
+
+    FillRect(fb, 18, 700, kPortraitWidth - 36, 3, true);
+    DrawMicIcon(fb);
+}
+
+void DrawReadBody(uint8_t* fb)
+{
+    if (!s_reader_in_book) {
+        DrawText(fb, 30, 125, "LIBRARY", 4);
+        DrawDivider(fb, 180);
+        DrawText(fb, 72, 300, "READER STORAGE", 3);
+        DrawText(fb, 114, 350, "NOT WIRED YET", 3);
+        DrawText(fb, 82, 445, "EPUB UI IS READY", 2);
+    } else {
+        char page[32] = {};
+        std::snprintf(page, sizeof(page), "PAGE %d", s_reader_page + 1);
+        DrawText(fb, 30, 125, "CURRENT BOOK", 3);
+        DrawText(fb, 334, 125, page, 2);
+        DrawDivider(fb, 175);
+        DrawWrappedText(fb, 35, 215,
+                        "EPUB PAGE CONTENT WILL RENDER HERE WHEN STORAGE AND PARSING ARE WIRED",
+                        2, 31, 14);
+    }
+}
+
+void DrawMenuOverlay(uint8_t* fb)
+{
+    if (s_ui_menu == UiMenu::kNone) return;
+    FillRect(fb, 55, 260, 370, 250, false);
+    FillRect(fb, 61, 266, 358, 238, true);
+
+    if (s_ui_menu == UiMenu::kChat) {
+        DrawText(fb, 95, 292, "CHAT MENU", 3);
+        DrawText(fb, 86, 360, s_menu_index == 0 ? "> NEW CHAT" : "  NEW CHAT", 3);
+        DrawText(fb, 86, 420, s_menu_index == 1 ? "> CANCEL" : "  CANCEL", 3);
+    } else if (s_ui_menu == UiMenu::kClearConfirm) {
+        DrawText(fb, 93, 300, "CLEAR CHAT", 3);
+        DrawText(fb, 87, 365, "PRESS TO CONFIRM", 2);
+        DrawText(fb, 82, 420, "UP DOWN TO CANCEL", 2);
+    } else if (s_ui_menu == UiMenu::kReader) {
+        DrawText(fb, 85, 292, "READER MENU", 3);
+        DrawText(fb, 78, 360, s_menu_index == 0 ? "> LIBRARY" : "  LIBRARY", 3);
+        DrawText(fb, 78, 420, s_menu_index == 1 ? "> CANCEL" : "  CANCEL", 3);
+    }
+}
+
+void DrawSwapOverlay(uint8_t* fb)
+{
+    if (!s_swap_notice) return;
+    FillRect(fb, 58, 310, 364, 145, false);
+    FillRect(fb, 64, 316, 352, 133, true);
+    DrawText(fb, 86, 345, "SWAPPING MODE", 3);
+    DrawText(fb, 118, 400, "KEEP HOLDING", 2);
+}
+
+void RenderUi()
+{
+    auto* fb = s_panel->framebuffer();
+    s_panel->Clear(true);
+    DrawTopBar(fb);
+    if (s_ui_mode == UiMode::kChat) DrawChatBody(fb);
+    else DrawReadBody(fb);
+    DrawMenuOverlay(fb);
+    DrawSwapOverlay(fb);
+}
+
+void RefreshUiPartial()
+{
+    const esp_err_t err = s_panel->RefreshChangedRegion();
+    if (err != ESP_OK) {
+        ESP_LOGW(kTag, "Partial UI refresh failed: %s", esp_err_to_name(err));
+    }
+}
+
+void ToggleMode()
+{
+    s_ui_mode = s_ui_mode == UiMode::kChat ? UiMode::kRead : UiMode::kChat;
+    s_ui_menu = UiMenu::kNone;
+    s_menu_index = 0;
+    s_swap_notice = false;
+    SaveUiState();
+    RenderUi();
+    (void)s_panel->RefreshFastBase();
+}
+
+void HandleDirection(bool up)
+{
+    if (s_power_menu) {
+        s_power_menu = false;
+        RenderUi();
+        (void)s_panel->RefreshFastBase();
+        return;
+    }
+
+    if (s_ui_menu == UiMenu::kClearConfirm) {
+        s_ui_menu = UiMenu::kNone;
+        RenderUi();
+        RefreshUiPartial();
+        return;
+    }
+
+    if (s_ui_menu == UiMenu::kChat || s_ui_menu == UiMenu::kReader) {
+        s_menu_index = s_menu_index == 0 ? 1 : 0;
+        RenderUi();
+        RefreshUiPartial();
+        return;
+    }
+
+    if (s_ui_mode == UiMode::kChat) {
+        const int total = static_cast<int>(s_chat_messages.size());
+        const int max_offset = std::max(0, total - 1);
+        if (up) s_chat_scroll_offset = std::min(max_offset, s_chat_scroll_offset + 1);
+        else s_chat_scroll_offset = std::max(0, s_chat_scroll_offset - 1);
+        SaveUiState();
+        RenderUi();
+        RefreshUiPartial();
+        return;
+    }
+
+    if (!s_reader_in_book) return;
+    if (up) s_reader_page = std::max(0, s_reader_page - 1);
+    else ++s_reader_page;
+    ++s_reader_page_turns;
+    SaveUiState();
+    RenderUi();
+    if ((s_reader_page_turns % kReaderFullRefreshEveryPages) == 0) {
+        (void)s_panel->RefreshFullBase();
+    } else {
+        (void)s_panel->RefreshFastBase();
+    }
+}
+
+void HandleSelectShort()
+{
+    if (s_power_menu) {
+        ESP_LOGI(kTag, "Power menu: reboot requested");
+        RenderShuttingDown();
+        (void)s_panel->RefreshFullBase();
+        vTaskDelay(pdMS_TO_TICKS(500));
+        esp_restart();
+    }
+
+    if (s_ui_mode == UiMode::kChat) {
+        if (s_ui_menu == UiMenu::kNone) {
+            s_ui_menu = UiMenu::kChat;
+            s_menu_index = 0;
+        } else if (s_ui_menu == UiMenu::kChat) {
+            if (s_menu_index == 0) s_ui_menu = UiMenu::kClearConfirm;
+            else s_ui_menu = UiMenu::kNone;
+        } else if (s_ui_menu == UiMenu::kClearConfirm) {
+            ClearChat();
+            s_ui_menu = UiMenu::kNone;
+        }
+        RenderUi();
+        RefreshUiPartial();
+        return;
+    }
+
+    if (!s_reader_in_book) return;
+    if (s_ui_menu == UiMenu::kNone) {
+        s_ui_menu = UiMenu::kReader;
+        s_menu_index = 0;
+    } else if (s_ui_menu == UiMenu::kReader) {
+        if (s_menu_index == 0) {
+            s_reader_in_book = false;
+            s_ui_menu = UiMenu::kNone;
+        } else {
+            s_ui_menu = UiMenu::kNone;
+        }
+    }
+    RenderUi();
+    RefreshUiPartial();
+}
+
+
 void RenderTranscribing()
 {
     auto* fb = s_panel->framebuffer();
@@ -582,13 +921,15 @@ void RenderClankerResult(const std::string& transcript,
 
 void StartCapture()
 {
+    if (s_ui_mode != UiMode::kChat || s_power_menu) return;
     s_clip.clear();
     s_last_capture = {};
     s_recording = true;
     s_recording_started_us = esp_timer_get_time();
     s_codec->EnableInput(true);
-    RenderRecording();
-    (void)s_panel->RefreshFastBase();
+    s_mic_state = MicState::kRecording;
+    RenderUi();
+    RefreshUiPartial();
     ESP_LOGI(kTag, "Capture started");
 }
 
@@ -629,53 +970,64 @@ void FinishCapture()
         ? 0
         : static_cast<int>(std::sqrt(static_cast<double>(sum_sq) / s_clip.size()));
 
-    const uint32_t wall_ms =
-        static_cast<uint32_t>((esp_timer_get_time() - s_recording_started_us) / 1000ULL);
-    ESP_LOGI(kTag,
-             "Capture finished: samples=%lu pcm_ms=%lu wall_ms=%lu peak=%d rms=%d clipped=%d",
+    ESP_LOGI(kTag, "Capture finished: samples=%lu pcm_ms=%lu peak=%d rms=%d clipped=%d",
              static_cast<unsigned long>(s_last_capture.samples),
              static_cast<unsigned long>(s_last_capture.duration_ms),
-             static_cast<unsigned long>(wall_ms),
              s_last_capture.peak, s_last_capture.rms, s_last_capture.clipped ? 1 : 0);
 
-    RenderCaptureStats(s_last_capture);
-    (void)s_panel->RefreshFastBase();
+    s_mic_state = MicState::kProcessing;
+    RenderUi();
+    RefreshUiPartial();
 
     const beta_network::Snapshot net = beta_network::GetSnapshot();
-    if (net.mode != beta_network::Mode::kConnected) {
-        ESP_LOGW(kTag, "Skipping transcription: Wi-Fi not connected");
+    if (net.mode != beta_network::Mode::kConnected || !beta_transcription::HasApiKey()) {
+        s_chat_messages.push_back({false, "NETWORK OR OPENAI NOT READY"});
+        s_mic_state = MicState::kIdle;
+        s_chat_scroll_offset = 0;
+        SaveUiState();
+        RenderUi();
+        RefreshUiPartial();
         return;
     }
-    if (!beta_transcription::HasApiKey()) {
-        ESP_LOGW(kTag, "Skipping transcription: OpenAI key missing");
-        return;
-    }
-
-    RenderTranscribing();
-    (void)s_panel->RefreshFastBase();
 
     const beta_transcription::Result tx =
         beta_transcription::TranscribePcm16(s_clip.data(), s_clip.size(), kAudioSampleRate);
-    RenderTranscriptionResult(tx);
-    (void)s_panel->RefreshFastBase();
-
     if (!tx.success) {
+        s_chat_messages.push_back({false, "TRANSCRIPTION FAILED " + tx.error_code});
+        s_mic_state = MicState::kIdle;
+        s_chat_scroll_offset = 0;
+        SaveUiState();
+        RenderUi();
+        RefreshUiPartial();
         return;
     }
 
-    RenderThinking();
-    (void)s_panel->RefreshFastBase();
+    s_chat_messages.push_back({true, tx.transcript});
+    s_chat_scroll_offset = 0;
+    RenderUi();
+    RefreshUiPartial();
 
-    const beta_clanker::Result answer = beta_clanker::Ask(tx.transcript);
-    RenderClankerResult(tx.transcript, answer);
-    (void)s_panel->RefreshFastBase();
+    const beta_clanker::Result answer =
+        beta_clanker::Ask(tx.transcript, s_previous_response_id);
+    if (answer.success) {
+        s_chat_messages.push_back({false, answer.response});
+        if (!answer.response_id.empty()) s_previous_response_id = answer.response_id;
+    } else {
+        s_chat_messages.push_back({false, "CLANKER ERROR " + answer.error_code});
+    }
+
+    s_mic_state = MicState::kIdle;
+    s_chat_scroll_offset = 0;
+    SaveUiState();
+    RenderUi();
+    RefreshUiPartial();
 }
 
 }  // namespace
 
 extern "C" void app_main(void)
 {
-    ESP_LOGI(kTag, "CLANKER Pocket BETA polish A boot");
+    ESP_LOGI(kTag, "CLANKER Pocket CHAT/READ UI boot");
 
     if (InitPower() != ESP_OK || InitButtons() != ESP_OK) {
         ESP_LOGE(kTag, "Core hardware init failed");
@@ -693,8 +1045,6 @@ extern "C" void app_main(void)
         ESP_LOGE(kTag, "Splash refresh failed");
         return;
     }
-    // Give the branded boot screen enough dwell time to actually be seen on e-paper
-    // before initialization advances to the home screen.
     vTaskDelay(pdMS_TO_TICKS(1800));
 
     if (InitAudio() != ESP_OK) {
@@ -707,18 +1057,17 @@ extern "C" void app_main(void)
         ESP_LOGW(kTag, "Network init returned: %s", esp_err_to_name(network_err));
     }
     beta_network::RunHttpsProbe();
+    LoadUiState();
 
-    uint32_t press_count = 0;
-    RenderHome();
+    RenderUi();
     if (s_panel->RefreshFastBase() != ESP_OK) {
-        ESP_LOGE(kTag, "Home screen refresh failed");
+        ESP_LOGE(kTag, "Initial UI refresh failed");
         return;
     }
 
-    constexpr std::array<gpio_num_t, 4> pins = {
-        kButtonBoot, kButtonUp, kButtonSelect, kButtonDown
-    };
     std::array<int, 4> last = {1,1,1,1};
+    int64_t select_down_us = 0;
+    bool select_consumed = false;
 
     while (true) {
         if (s_power_long_pending.exchange(false)) {
@@ -727,73 +1076,73 @@ extern "C" void app_main(void)
             RenderShuttingDown();
             (void)s_panel->RefreshFullBase();
             vTaskDelay(pdMS_TO_TICKS(500));
-            if (s_codec) {
-                s_codec->Shutdown();
-            }
+            if (s_codec) s_codec->Shutdown();
             vTaskDelay(pdMS_TO_TICKS(100));
-            if (s_pmic) {
-                s_pmic->PowerOff();
-            }
-            // With USB/VBUS present the PMIC may keep the rail alive and return.
-            // Do not resume normal interaction after a shutdown request.
-            while (true) {
-                vTaskDelay(pdMS_TO_TICKS(1000));
-            }
+            if (s_pmic) s_pmic->PowerOff();
+            while (true) vTaskDelay(pdMS_TO_TICKS(1000));
         }
 
         if (s_power_short_pending.exchange(false)) {
             ESP_LOGI(kTag, "Power key short press: power menu");
             s_power_menu = true;
-            s_status_screen = false;
+            s_ui_menu = UiMenu::kNone;
             RenderPowerMenu();
             (void)s_panel->RefreshFastBase();
         }
 
         const int boot_now = gpio_get_level(kButtonBoot);
-        if (last[0] == 1 && boot_now == 0) {
-            ++press_count;
+        if (last[0] == 1 && boot_now == 0 && s_ui_mode == UiMode::kChat && !s_power_menu) {
             StartCapture();
         }
-
-        if (s_recording && boot_now == 0) {
-            PumpCapture();
-        }
-
-        if (last[0] == 0 && boot_now == 1) {
-            FinishCapture();
-        }
+        if (s_recording && boot_now == 0) PumpCapture();
+        if (last[0] == 0 && boot_now == 1 && s_recording) FinishCapture();
         last[0] = boot_now;
 
         if (!s_recording) {
-            for (size_t i = 1; i < pins.size(); ++i) {
-                const int now = gpio_get_level(pins[i]);
-                if (last[i] == 1 && now == 0) {
-                    ++press_count;
-                    ESP_LOGI(kTag, "Button %s pressed (%lu)", ButtonName(static_cast<int>(i)),
-                             static_cast<unsigned long>(press_count));
-
-                    if (s_power_menu && pins[i] == kButtonSelect) {
-                        ESP_LOGI(kTag, "Power menu: reboot requested");
-                        RenderShuttingDown();
-                        (void)s_panel->RefreshFullBase();
-                        vTaskDelay(pdMS_TO_TICKS(500));
-                        esp_restart();
-                    } else if (s_power_menu) {
-                        s_power_menu = false;
-                        s_status_screen = false;
-                        RenderHome();
-                    } else if (pins[i] == kButtonSelect) {
-                        beta_network::RunHttpsProbe();
-                        s_status_screen = true;
-                        RenderStatus();
-                    } else {
-                        s_status_screen = false;
-                        RenderHome();
-                    }
-                    (void)s_panel->RefreshFastBase();
-                }
-                last[i] = now;
+            const int select_now = gpio_get_level(kButtonSelect);
+            if (last[2] == 1 && select_now == 0) {
+                select_down_us = esp_timer_get_time();
+                select_consumed = false;
+                s_swap_notice = false;
             }
+
+            if (select_now == 0 && select_down_us != 0 && !select_consumed && !s_power_menu) {
+                const int64_t held_us = esp_timer_get_time() - select_down_us;
+                if (held_us >= kModeSwapNoticeUs && !s_swap_notice) {
+                    s_swap_notice = true;
+                    RenderUi();
+                    RefreshUiPartial();
+                }
+                if (held_us >= kModeSwapCommitUs) {
+                    select_consumed = true;
+                    ToggleMode();
+                }
+            }
+
+            if (last[2] == 0 && select_now == 1) {
+                if (!select_consumed) {
+                    if (s_swap_notice) {
+                        s_swap_notice = false;
+                        RenderUi();
+                        RefreshUiPartial();
+                    } else {
+                        HandleSelectShort();
+                    }
+                }
+                select_down_us = 0;
+                select_consumed = false;
+                s_swap_notice = false;
+            }
+            last[2] = select_now;
+
+            const int up_now = gpio_get_level(kButtonUp);
+            if (last[1] == 1 && up_now == 0) HandleDirection(true);
+            last[1] = up_now;
+
+            const int down_now = gpio_get_level(kButtonDown);
+            if (last[3] == 1 && down_now == 0) HandleDirection(false);
+            last[3] = down_now;
+
             vTaskDelay(pdMS_TO_TICKS(10));
         }
     }
