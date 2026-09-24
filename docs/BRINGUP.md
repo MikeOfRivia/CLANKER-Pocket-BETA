@@ -12,7 +12,7 @@ Physically proven on-device:
 
 This is the first known-good CLANKER Pocket hardware baseline.
 
-## Phase 2 - microphone capture — CURRENT
+## Phase 2 - microphone capture — PASSED
 
 BOOT is now push-to-talk.
 
@@ -37,9 +37,18 @@ Success criteria:
 - Peak and RMS are non-zero when speaking.
 - Radial Up / Select / Down still work after recording.
 
-## Phase 3 - network
+## Phase 3 - network — CURRENT
 
-Prove Wi-Fi and a small HTTPS request independently of audio.
+If no saved Wi-Fi credentials exist, the device starts an open provisioning AP named `CLANKERBETA-XXXXXX` and shows `192.168.4.1` on-screen. Enter SSID/password there; the device saves them to NVS and reboots.
+
+With Wi-Fi connected, the firmware performs an HTTPS GET to `https://example.com/` using the ESP-IDF certificate bundle and shows the returned HTTP status on the e-paper display. Radial SELECT reruns the HTTPS probe.
+
+Success criteria:
+- Provisioning survives reboot.
+- Wi-Fi reconnects from NVS without re-entry.
+- HTTPS returns a real HTTP status (normally 200).
+- BOOT microphone capture still works.
+- Up / Select / Down remain responsive after both recording and HTTPS activity.
 
 ## Phase 4 - OpenAI transcription
 
