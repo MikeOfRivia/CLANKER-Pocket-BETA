@@ -368,10 +368,22 @@ void RenderShuttingDown()
 {
     auto* fb = s_panel->framebuffer();
     s_panel->Clear(true);
-    DrawText(fb, 70, 260, "CLANKER POCKET", 4);
-    DrawDivider(fb, 330);
-    DrawText(fb, 77, 395, "POWERING DOWN", 4);
-    DrawText(fb, 108, 475, "SEE YOU SOON", 2);
+
+    const auto* header = reinterpret_cast<const Cpr1Header*>(kLogoStart);
+    int logo_x = 30;
+    const int logo_y = 135;
+    if (static_cast<size_t>(kLogoEnd - kLogoStart) >= sizeof(Cpr1Header) &&
+        std::memcmp(header->magic, "CPR1", 4) == 0) {
+        logo_x = (kPortraitWidth - header->width) / 2;
+    }
+    if (!DrawEmbeddedLogo(fb, logo_x, logo_y)) {
+        DrawText(fb, 48, 220, "CLANKER", 6);
+        DrawText(fb, 78, 290, "POCKET", 4);
+    }
+
+    DrawDivider(fb, 500);
+    DrawText(fb, 105, 550, "POWERED DOWN", 4);
+    DrawText(fb, 78, 625, "PRESS POWER TO REVIVE", 2);
 }
 
 EpaperPanelConfig PanelConfig()
