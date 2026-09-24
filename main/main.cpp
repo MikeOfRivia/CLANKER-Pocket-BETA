@@ -536,13 +536,13 @@ std::string DisplaySafeUpper(std::string text)
     return text;
 }
 
-void DrawWrappedText(uint8_t* fb, int x, int y, const std::string& input,
-                     int scale, int max_chars, int max_lines)
+std::vector<std::string> WrapTextLines(const std::string& input, int max_chars)
 {
+    std::vector<std::string> lines;
     std::string text = DisplaySafeUpper(input);
     size_t pos = 0;
-    int line = 0;
-    while (pos < text.size() && line < max_lines) {
+
+    while (pos < text.size()) {
         while (pos < text.size() && text[pos] == ' ') ++pos;
         if (pos >= text.size()) break;
 
@@ -551,10 +551,26 @@ void DrawWrappedText(uint8_t* fb, int x, int y, const std::string& input,
             const size_t space = text.rfind(' ', end);
             if (space != std::string::npos && space > pos) end = space;
         }
-        std::string chunk = text.substr(pos, end - pos);
-        DrawText(fb, x, y + line * (8 * scale + 8), chunk.c_str(), scale);
+        if (end <= pos) {
+            end = std::min(text.size(), pos + static_cast<size_t>(max_chars));
+        }
+
+        lines.push_back(text.substr(pos, end - pos));
         pos = end;
-        ++line;
+    }
+
+    if (lines.empty()) lines.push_back("");
+    return lines;
+}
+
+void DrawWrappedText(uint8_t* fb, int x, int y, const std::string& input,
+                     int scale, int max_chars, int max_lines)
+{
+    const auto lines = WrapTextLines(input, max_chars);
+    const int count = std::min(max_lines, static_cast<int>(lines.size()));
+    for (int line = 0; line < count; ++line) {
+        DrawText(fb, x, y + line * (8 * scale + 8),
+                 lines[static_cast<size_t>(line)].c_str(), scale);
     }
 }
 
@@ -670,12 +686,14 @@ void DrawBatteryIndicator(uint8_t* fb)
 void DrawTopBar(uint8_t* fb)
 {
     DrawClankerWordmark(fb, 12, 31);
+
     if (s_settings_open) {
-        DrawText(fb, 302, 38, "SETTINGS", 2);
+        DrawText(fb, 304, 38, "SETTINGS", 2);
     } else {
-        DrawTab(fb, 272, "CHAT", s_ui_mode == UiMode::kChat);
-        DrawTab(fb, 340, "READ", s_ui_mode == UiMode::kRead);
+        const char* mode = s_ui_mode == UiMode::kChat ? "< CHAT >" : "< READ >";
+        DrawText(fb, 292, 38, mode, 2);
     }
+
     DrawBatteryIndicator(fb);
     FillRect(fb, 18, 92, kPortraitWidth - 36, 3, true);
 }
@@ -702,16 +720,47 @@ void DrawMicIcon(uint8_t* fb)
     }
 }
 
+int ChatMessageMaxChars(const ChatMessage& msg)
+{
+    return msg.user ? 27 : 34;
+}
+
+int ChatMessageWidth(const ChatMessage& msg)
+{
+    return msg.user ? 336 : 432;
+}
+
+int ChatMessageLineCount(const ChatMessage& msg)
+{
+    return static_cast<int>(
+        WrapTextLines(msg.text, ChatMessageMaxChars(msg)).size());
+}
+
+int ChatMessageHeight(const ChatMessage& msg)
+{
+    constexpr int kLineStep = 24;
+    constexpr int kPadTop = 14;
+    constexpr int kPadBottom = 14;
+    return kPadTop + ChatMessageLineCount(msg) * kLineStep + kPadBottom;
+}
+
 void DrawChatMessage(uint8_t* fb, int y, const ChatMessage& msg)
 {
-    const int x = msg.user ? 158 : 24;
-    const int w = 298;
-    DrawOutlineRect(fb, x, y, w, 124, 2);
-    DrawWrappedText(fb, x + 12, y + 16, msg.text, 2, 22, 4);
+    const int w = ChatMessageWidth(msg);
+    const int x = msg.user ? (kPortraitWidth - 24 - w) : 24;
+    const int h = ChatMessageHeight(msg);
+    const int max_chars = ChatMessageMaxChars(msg);
+
+    DrawOutlineRect(fb, x, y, w, h, 2);
+    DrawWrappedText(fb, x + 12, y + 14, msg.text, 2, max_chars, 99);
 }
 
 void DrawChatBody(uint8_t* fb)
 {
+    constexpr int kBodyTop = 112;
+    constexpr int kBodyBottom = 688;
+    constexpr int kGap = 10;
+
     if (s_chat_messages.empty()) {
         DrawText(fb, 104, 300, "HOLD BOOT TO TALK", 3);
         DrawText(fb, 91, 355, "UP DOWN SCROLL CHAT", 2);
@@ -719,12 +768,38 @@ void DrawChatBody(uint8_t* fb)
         const int total = static_cast<int>(s_chat_messages.size());
         const int max_offset = std::max(0, total - 1);
         s_chat_scroll_offset = std::clamp(s_chat_scroll_offset, 0, max_offset);
+
         const int end = std::max(0, total - s_chat_scroll_offset);
-        const int start = std::max(0, end - kChatVisibleMessages);
-        int y = 112;
-        for (int i = start; i < end && y + 124 <= 688; ++i) {
-            DrawChatMessage(fb, y, s_chat_messages[static_cast<size_t>(i)]);
-            y += 136;
+        int start = std::max(0, end - 1);
+        int used = 0;
+
+        while (start > 0) {
+            const int candidate_h =
+                ChatMessageHeight(s_chat_messages[static_cast<size_t>(start - 1)]);
+            const int current_h =
+                ChatMessageHeight(s_chat_messages[static_cast<size_t>(start)]);
+            const int next_used = used == 0
+                ? current_h + kGap + candidate_h
+                : used + kGap + candidate_h;
+
+            if (next_used > (kBodyBottom - kBodyTop)) break;
+            used = next_used;
+            --start;
+        }
+
+        int y = kBodyTop;
+        for (int i = start; i < end; ++i) {
+            const auto& msg = s_chat_messages[static_cast<size_t>(i)];
+            const int h = ChatMessageHeight(msg);
+
+            if (h > (kBodyBottom - kBodyTop)) {
+                DrawChatMessage(fb, y, msg);
+                break;
+            }
+
+            if (y + h > kBodyBottom) break;
+            DrawChatMessage(fb, y, msg);
+            y += h + kGap;
         }
     }
 
