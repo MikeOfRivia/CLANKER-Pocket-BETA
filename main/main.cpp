@@ -30,6 +30,9 @@ namespace {
 
 constexpr const char* kTag = "ClankerBeta";
 
+extern const uint8_t kLogoStart[] asm("_binary_clanker_pocket_logo_rle_start");
+extern const uint8_t kLogoEnd[] asm("_binary_clanker_pocket_logo_rle_end");
+
 constexpr gpio_num_t kButtonBoot = GPIO_NUM_0;
 constexpr gpio_num_t kButtonUp = GPIO_NUM_4;
 constexpr gpio_num_t kButtonSelect = GPIO_NUM_5;
@@ -69,6 +72,7 @@ std::unique_ptr<EpaperPanel> s_panel;
 std::unique_ptr<Es8311Codec> s_codec;
 PsramVector<int16_t> s_clip;
 bool s_recording = false;
+bool s_status_screen = false;
 int64_t s_recording_started_us = 0;
 
 struct CaptureStats {
@@ -155,6 +159,139 @@ void DrawText(uint8_t* fb, int x, int y, const char* text, int scale)
     }
 }
 
+#pragma pack(push, 1)
+struct Cpr1Header {
+    char magic[4];
+    uint16_t width;
+    uint16_t height;
+    uint32_t run_count;
+};
+
+struct Cpr1Run {
+    uint16_t y;
+    uint16_t x;
+    uint16_t length;
+};
+#pragma pack(pop)
+
+bool DrawEmbeddedLogo(uint8_t* fb, int x, int y)
+{
+    const size_t bytes = static_cast<size_t>(kLogoEnd - kLogoStart);
+    if (bytes < sizeof(Cpr1Header)) return false;
+
+    const auto* header = reinterpret_cast<const Cpr1Header*>(kLogoStart);
+    if (std::memcmp(header->magic, "CPR1", 4) != 0) return false;
+
+    const size_t required =
+        sizeof(Cpr1Header) + static_cast<size_t>(header->run_count) * sizeof(Cpr1Run);
+    if (required > bytes) return false;
+
+    const auto* runs =
+        reinterpret_cast<const Cpr1Run*>(kLogoStart + sizeof(Cpr1Header));
+    for (uint32_t i = 0; i < header->run_count; ++i) {
+        const Cpr1Run& run = runs[i];
+        FillRect(fb, x + run.x, y + run.y, run.length, 1, true);
+    }
+    return true;
+}
+
+void DrawDivider(uint8_t* fb, int y)
+{
+    FillRect(fb, 42, y, kPortraitWidth - 84, 3, true);
+}
+
+void RenderSplash()
+{
+    auto* fb = s_panel->framebuffer();
+    s_panel->Clear(true);
+
+    const auto* header = reinterpret_cast<const Cpr1Header*>(kLogoStart);
+    int logo_x = 30;
+    int logo_y = 145;
+    if (static_cast<size_t>(kLogoEnd - kLogoStart) >= sizeof(Cpr1Header) &&
+        std::memcmp(header->magic, "CPR1", 4) == 0) {
+        logo_x = (kPortraitWidth - header->width) / 2;
+    }
+    if (!DrawEmbeddedLogo(fb, logo_x, logo_y)) {
+        DrawText(fb, 48, 230, "CLANKER", 6);
+        DrawText(fb, 78, 300, "POCKET", 4);
+    }
+
+    DrawDivider(fb, 505);
+    DrawText(fb, 177, 555, "BETA", 4);
+    DrawText(fb, 135, 630, "STARTING", 3);
+}
+
+void RenderHome()
+{
+    auto* fb = s_panel->framebuffer();
+    s_panel->Clear(true);
+
+    DrawText(fb, 54, 70, "CLANKER POCKET", 4);
+    DrawDivider(fb, 125);
+
+    const beta_network::Snapshot net = beta_network::GetSnapshot();
+    if (net.mode == beta_network::Mode::kProvisioning) {
+        DrawText(fb, 75, 210, "SETUP REQUIRED", 4);
+        DrawText(fb, 58, 315, "JOIN:", 2);
+        DrawText(fb, 58, 355, net.ap_name.c_str(), 2);
+        DrawText(fb, 58, 420, "OPEN 192.168.4.1", 2);
+        DrawDivider(fb, 535);
+        DrawText(fb, 80, 590, "ENTER WIFI + API KEY", 2);
+    } else {
+        DrawText(fb, 142, 205, "READY", 5);
+        DrawText(fb, 64, 315, "HOLD BOOT TO TALK", 3);
+
+        const bool wifi_ok = net.mode == beta_network::Mode::kConnected;
+        const bool api_ok = beta_transcription::HasApiKey();
+        DrawText(fb, 78, 420, wifi_ok ? "WIFI  ONLINE" : "WIFI  OFFLINE", 2);
+        DrawText(fb, 78, 465, api_ok ? "OPENAI READY" : "OPENAI MISSING", 2);
+
+        DrawDivider(fb, 555);
+        DrawText(fb, 102, 610, "SELECT  STATUS", 2);
+        DrawText(fb, 111, 665, "BOOT  TALK", 2);
+    }
+
+    DrawText(fb, 155, 735, "POLISH A", 1);
+}
+
+void RenderStatus()
+{
+    auto* fb = s_panel->framebuffer();
+    s_panel->Clear(true);
+
+    DrawText(fb, 72, 70, "SYSTEM STATUS", 4);
+    DrawDivider(fb, 125);
+
+    const beta_network::Snapshot net = beta_network::GetSnapshot();
+    const char* wifi =
+        net.mode == beta_network::Mode::kConnected ? "CONNECTED" :
+        net.mode == beta_network::Mode::kProvisioning ? "PROVISIONING" : "OFFLINE";
+
+    DrawText(fb, 55, 190, "WIFI:", 2);
+    DrawText(fb, 190, 190, wifi, 2);
+
+    char https[32] = {};
+    if (net.http_status > 0) {
+        std::snprintf(https, sizeof(https), "%d", net.http_status);
+    } else if (!net.probe_error.empty()) {
+        std::snprintf(https, sizeof(https), "ERROR");
+    } else {
+        std::snprintf(https, sizeof(https), "NOT TESTED");
+    }
+    DrawText(fb, 55, 255, "HTTPS:", 2);
+    DrawText(fb, 190, 255, https, 2);
+
+    DrawText(fb, 55, 320, "OPENAI:", 2);
+    DrawText(fb, 190, 320,
+             beta_transcription::HasApiKey() ? "READY" : "MISSING", 2);
+
+    DrawDivider(fb, 430);
+    DrawText(fb, 62, 490, "SELECT  RETEST HTTPS", 2);
+    DrawText(fb, 96, 550, "UP/DOWN  HOME", 2);
+    DrawText(fb, 111, 610, "BOOT  TALK", 2);
+}
+
 EpaperPanelConfig PanelConfig()
 {
     EpaperPanelConfig c = {};
@@ -230,50 +367,11 @@ const char* ButtonName(int index)
 
 void DrawFrame(uint8_t* fb)
 {
-    FillRect(fb, 20, 20, kPortraitWidth - 40, 8);
-    FillRect(fb, 20, kPortraitHeight - 28, kPortraitWidth - 40, 8);
-    FillRect(fb, 20, 20, 8, kPortraitHeight - 40);
-    FillRect(fb, kPortraitWidth - 28, 20, 8, kPortraitHeight - 40);
-    DrawText(fb, 48, 70, "CLANKER", 6);
-    DrawText(fb, 78, 135, "POCKET BETA", 4);
-}
-
-void RenderIdle(const char* last_button, uint32_t press_count)
-{
-    auto* fb = s_panel->framebuffer();
-    s_panel->Clear(true);
-    DrawFrame(fb);
-    DrawText(fb, 105, 205, "PHASE 5", 4);
-
-    const beta_network::Snapshot net = beta_network::GetSnapshot();
-    if (net.mode == beta_network::Mode::kProvisioning) {
-        DrawText(fb, 55, 275, "WIFI PROVISIONING", 3);
-        DrawText(fb, 45, 325, net.ap_name.c_str(), 3);
-        DrawText(fb, 65, 375, "OPEN 192.168.4.1", 2);
-    } else if (net.mode == beta_network::Mode::kConnected) {
-        DrawText(fb, 70, 275, "WIFI CONNECTED", 3);
-        char http[32] = {};
-        if (net.http_status > 0) {
-            std::snprintf(http, sizeof(http), "HTTPS STATUS: %d", net.http_status);
-        } else if (!net.probe_error.empty()) {
-            std::snprintf(http, sizeof(http), "HTTPS ERROR");
-        } else {
-            std::snprintf(http, sizeof(http), "HTTPS NOT TESTED");
-        }
-        DrawText(fb, 48, 325, http, 2);
-    } else {
-        DrawText(fb, 85, 275, "WIFI OFFLINE", 3);
-    }
-
-    DrawText(fb, 65, 430, "LAST BUTTON:", 3);
-    DrawText(fb, 95, 480, last_button, 4);
-
-    char count[16] = {};
-    std::snprintf(count, sizeof(count), "%lu", static_cast<unsigned long>(press_count));
-    DrawText(fb, 110, 550, "PRESS COUNT:", 3);
-    DrawText(fb, 200, 600, count, 4);
-    DrawText(fb, 50, 675, "BOOT RECORDS", 2);
-    DrawText(fb, 42, 710, "SELECT RETESTS HTTPS", 2);
+    FillRect(fb, 20, 20, kPortraitWidth - 40, 5);
+    FillRect(fb, 20, kPortraitHeight - 25, kPortraitWidth - 40, 5);
+    FillRect(fb, 20, 20, 5, kPortraitHeight - 40);
+    FillRect(fb, kPortraitWidth - 25, 20, 5, kPortraitHeight - 40);
+    DrawText(fb, 72, 65, "CLANKER POCKET", 3);
 }
 
 void RenderRecording()
@@ -507,7 +605,7 @@ void FinishCapture()
 
 extern "C" void app_main(void)
 {
-    ESP_LOGI(kTag, "CLANKER Pocket BETA Phase 5 boot");
+    ESP_LOGI(kTag, "CLANKER Pocket BETA polish A boot");
 
     if (InitPower() != ESP_OK || InitButtons() != ESP_OK) {
         ESP_LOGE(kTag, "Core hardware init failed");
@@ -517,6 +615,12 @@ extern "C" void app_main(void)
     s_panel = std::make_unique<EpaperPanel>(kRawWidth, kRawHeight, PanelConfig());
     if (s_panel->Initialize() != ESP_OK) {
         ESP_LOGE(kTag, "Display init failed");
+        return;
+    }
+
+    RenderSplash();
+    if (s_panel->RefreshFullBase() != ESP_OK) {
+        ESP_LOGE(kTag, "Splash refresh failed");
         return;
     }
 
@@ -532,9 +636,9 @@ extern "C" void app_main(void)
     beta_network::RunHttpsProbe();
 
     uint32_t press_count = 0;
-    RenderIdle("NONE", press_count);
-    if (s_panel->RefreshFullBase() != ESP_OK) {
-        ESP_LOGE(kTag, "Initial display refresh failed");
+    RenderHome();
+    if (s_panel->RefreshFastBase() != ESP_OK) {
+        ESP_LOGE(kTag, "Home screen refresh failed");
         return;
     }
 
@@ -566,10 +670,15 @@ extern "C" void app_main(void)
                     ++press_count;
                     ESP_LOGI(kTag, "Button %s pressed (%lu)", ButtonName(static_cast<int>(i)),
                              static_cast<unsigned long>(press_count));
+
                     if (pins[i] == kButtonSelect) {
                         beta_network::RunHttpsProbe();
+                        s_status_screen = true;
+                        RenderStatus();
+                    } else {
+                        s_status_screen = false;
+                        RenderHome();
                     }
-                    RenderIdle(ButtonName(static_cast<int>(i)), press_count);
                     (void)s_panel->RefreshFastBase();
                 }
                 last[i] = now;
