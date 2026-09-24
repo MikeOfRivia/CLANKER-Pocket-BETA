@@ -1,5 +1,6 @@
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 
@@ -8,6 +9,7 @@
 #include "driver/i2c_master.h"
 #include "driver/spi_master.h"
 #include "epaper_panel.h"
+#include "esp_check.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
