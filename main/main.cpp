@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cctype>
 #include <cstdint>
@@ -21,6 +22,7 @@
 #include "esp_check.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -73,6 +75,9 @@ std::unique_ptr<Es8311Codec> s_codec;
 PsramVector<int16_t> s_clip;
 bool s_recording = false;
 bool s_status_screen = false;
+bool s_power_menu = false;
+std::atomic<bool> s_power_short_pending{false};
+std::atomic<bool> s_power_long_pending{false};
 int64_t s_recording_started_us = 0;
 
 struct CaptureStats {
@@ -268,8 +273,8 @@ void RenderStatus()
         net.mode == beta_network::Mode::kConnected ? "CONNECTED" :
         net.mode == beta_network::Mode::kProvisioning ? "PROVISIONING" : "OFFLINE";
 
-    DrawText(fb, 55, 190, "WIFI:", 2);
-    DrawText(fb, 190, 190, wifi, 2);
+    DrawText(fb, 55, 180, "WIFI:", 2);
+    DrawText(fb, 190, 180, wifi, 2);
 
     char https[32] = {};
     if (net.http_status > 0) {
@@ -279,17 +284,61 @@ void RenderStatus()
     } else {
         std::snprintf(https, sizeof(https), "NOT TESTED");
     }
-    DrawText(fb, 55, 255, "HTTPS:", 2);
-    DrawText(fb, 190, 255, https, 2);
+    DrawText(fb, 55, 235, "HTTPS:", 2);
+    DrawText(fb, 190, 235, https, 2);
 
-    DrawText(fb, 55, 320, "OPENAI:", 2);
-    DrawText(fb, 190, 320,
+    DrawText(fb, 55, 290, "OPENAI:", 2);
+    DrawText(fb, 190, 290,
              beta_transcription::HasApiKey() ? "READY" : "MISSING", 2);
+
+    DrawText(fb, 55, 345, "BATTERY:", 2);
+    char battery[32] = {};
+    if (s_pmic && s_pmic->isBatteryConnect()) {
+        const int level = s_pmic->GetBatteryLevel();
+        if (level >= 0) {
+            std::snprintf(battery, sizeof(battery), "%d%% %s", level,
+                          s_pmic->IsCharging() ? "CHARGING" : "");
+        } else {
+            std::snprintf(battery, sizeof(battery), "CONNECTED");
+        }
+    } else {
+        std::snprintf(battery, sizeof(battery), "NO PACK");
+    }
+    DrawText(fb, 190, 345, battery, 2);
 
     DrawDivider(fb, 430);
     DrawText(fb, 62, 490, "SELECT  RETEST HTTPS", 2);
     DrawText(fb, 96, 550, "UP/DOWN  HOME", 2);
-    DrawText(fb, 111, 610, "BOOT  TALK", 2);
+    DrawText(fb, 70, 610, "PWR  POWER MENU", 2);
+}
+
+void RenderPowerMenu()
+{
+    auto* fb = s_panel->framebuffer();
+    s_panel->Clear(true);
+
+    DrawText(fb, 95, 70, "POWER", 5);
+    DrawDivider(fb, 145);
+
+    DrawText(fb, 70, 230, "SELECT", 3);
+    DrawText(fb, 218, 230, "REBOOT", 3);
+
+    DrawText(fb, 70, 330, "HOLD PWR", 3);
+    DrawText(fb, 250, 330, "SHUT DOWN", 2);
+
+    DrawDivider(fb, 445);
+    DrawText(fb, 90, 515, "UP/DOWN  HOME", 2);
+    DrawText(fb, 67, 575, "6S PWR  HARD OFF", 2);
+}
+
+void RenderShuttingDown()
+{
+    auto* fb = s_panel->framebuffer();
+    s_panel->Clear(true);
+    DrawText(fb, 70, 260, "CLANKER POCKET", 4);
+    DrawDivider(fb, 330);
+    DrawText(fb, 77, 395, "POWERING DOWN", 4);
+    DrawText(fb, 108, 475, "SEE YOU SOON", 2);
 }
 
 EpaperPanelConfig PanelConfig()
@@ -324,7 +373,28 @@ esp_err_t InitPower()
     s_pmic->enableALDO1(); s_pmic->setALDO1Voltage(3300);
     s_pmic->enableALDO2(); s_pmic->setALDO2Voltage(3300);
     s_pmic->enableALDO3(); s_pmic->setALDO3Voltage(3300);
-    ESP_LOGI(kTag, "AXP2101 rails enabled");
+
+    // Product power-key behavior:
+    // - PMIC long-press IRQ at ~2s -> firmware clean shutdown.
+    // - Hardware 6s hold remains an independent emergency power-off path.
+    s_pmic->SetIrqLevelTime(Axp2101::IrqLevelTime::k2S);
+    s_pmic->SetPowerKeyPressOffTime(Axp2101::PowerKeyPressOffTime::k6S);
+    s_pmic->SetPowerKeyPressOnTime(Axp2101::PowerKeyPressOnTime::k512Ms);
+    s_pmic->SetButtonPowerOffEnabled(true);
+    s_pmic->SetButtonPowerOffRestarts(false);
+    s_pmic->ClearIrqStatus();
+    s_pmic->EnablePowerKeyIrq(false);
+    s_pmic->SetInterruptCallback([](const Axp2101::InterruptEvent& event) {
+        // Long wins if the PMIC latches both bits during one hold.
+        if ((event.irq_status & XPOWERS_AXP2101_PKEY_LONG_IRQ) != 0) {
+            s_power_long_pending.store(true);
+            s_power_short_pending.store(false);
+        } else if ((event.irq_status & XPOWERS_AXP2101_PKEY_SHORT_IRQ) != 0) {
+            s_power_short_pending.store(true);
+        }
+    });
+
+    ESP_LOGI(kTag, "AXP2101 rails and power key enabled");
     return ESP_OK;
 }
 
@@ -651,6 +721,34 @@ extern "C" void app_main(void)
     std::array<int, 4> last = {1,1,1,1};
 
     while (true) {
+        if (s_power_long_pending.exchange(false)) {
+            ESP_LOGI(kTag, "Power key long press: clean shutdown");
+            s_power_menu = false;
+            RenderShuttingDown();
+            (void)s_panel->RefreshFullBase();
+            vTaskDelay(pdMS_TO_TICKS(500));
+            if (s_codec) {
+                s_codec->Shutdown();
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+            if (s_pmic) {
+                s_pmic->PowerOff();
+            }
+            // With USB/VBUS present the PMIC may keep the rail alive and return.
+            // Do not resume normal interaction after a shutdown request.
+            while (true) {
+                vTaskDelay(pdMS_TO_TICKS(1000));
+            }
+        }
+
+        if (s_power_short_pending.exchange(false)) {
+            ESP_LOGI(kTag, "Power key short press: power menu");
+            s_power_menu = true;
+            s_status_screen = false;
+            RenderPowerMenu();
+            (void)s_panel->RefreshFastBase();
+        }
+
         const int boot_now = gpio_get_level(kButtonBoot);
         if (last[0] == 1 && boot_now == 0) {
             ++press_count;
@@ -674,7 +772,17 @@ extern "C" void app_main(void)
                     ESP_LOGI(kTag, "Button %s pressed (%lu)", ButtonName(static_cast<int>(i)),
                              static_cast<unsigned long>(press_count));
 
-                    if (pins[i] == kButtonSelect) {
+                    if (s_power_menu && pins[i] == kButtonSelect) {
+                        ESP_LOGI(kTag, "Power menu: reboot requested");
+                        RenderShuttingDown();
+                        (void)s_panel->RefreshFullBase();
+                        vTaskDelay(pdMS_TO_TICKS(500));
+                        esp_restart();
+                    } else if (s_power_menu) {
+                        s_power_menu = false;
+                        s_status_screen = false;
+                        RenderHome();
+                    } else if (pins[i] == kButtonSelect) {
                         beta_network::RunHttpsProbe();
                         s_status_screen = true;
                         RenderStatus();
