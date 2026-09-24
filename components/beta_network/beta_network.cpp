@@ -30,6 +30,8 @@ constexpr const char* kTag = "BetaNetwork";
 constexpr const char* kNvsNamespace = "wifi";
 constexpr const char* kSsidKey = "ssid";
 constexpr const char* kPasswordKey = "password";
+constexpr const char* kOpenAiNvsNamespace = "openai";
+constexpr const char* kOpenAiApiKeyKey = "api_key";
 constexpr EventBits_t kConnectedBit = BIT0;
 constexpr EventBits_t kFailedBit = BIT1;
 constexpr int kMaxRetries = 8;
@@ -85,6 +87,16 @@ bool SaveCredentials(const std::string& ssid, const std::string& password)
     return err == ESP_OK;
 }
 
+bool SaveOpenAiKey(const std::string& api_key)
+{
+    nvs_handle_t handle = 0;
+    if (nvs_open(kOpenAiNvsNamespace, NVS_READWRITE, &handle) != ESP_OK) return false;
+    esp_err_t err = nvs_set_str(handle, kOpenAiApiKeyKey, api_key.c_str());
+    if (err == ESP_OK) err = nvs_commit(handle);
+    nvs_close(handle);
+    return err == ESP_OK;
+}
+
 std::string UrlDecode(const char* input)
 {
     std::string out;
@@ -131,10 +143,11 @@ esp_err_t RootHandler(httpd_req_t* req)
     static constexpr char kPage[] =
         "<!doctype html><html><head><meta name=viewport content='width=device-width,initial-scale=1'>"
         "<title>CLANKER Pocket BETA</title></head><body>"
-        "<h1>CLANKER Pocket BETA</h1><p>Phase 3 Wi-Fi provisioning</p>"
+        "<h1>CLANKER Pocket BETA</h1><p>Phase 4 provisioning</p>"
         "<form action='/save' method='get'>"
         "<label>Wi-Fi SSID<br><input name='ssid' required></label><br><br>"
-        "<label>Password<br><input name='password' type='password'></label><br><br>"
+        "<label>Wi-Fi Password<br><input name='password' type='password'></label><br><br>"
+        "<label>OpenAI API Key<br><input name='openai' type='password' required></label><br><br>"
         "<button type='submit'>Save & Reboot</button></form></body></html>";
     httpd_resp_set_type(req, "text/html");
     return httpd_resp_send(req, kPage, HTTPD_RESP_USE_STRLEN);
@@ -143,7 +156,7 @@ esp_err_t RootHandler(httpd_req_t* req)
 esp_err_t SaveHandler(httpd_req_t* req)
 {
     const size_t query_len = httpd_req_get_url_query_len(req);
-    if (query_len == 0 || query_len > 512) {
+    if (query_len == 0 || query_len > 1024) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing settings");
     }
 
@@ -154,17 +167,23 @@ esp_err_t SaveHandler(httpd_req_t* req)
 
     char ssid_raw[160] = {};
     char password_raw[256] = {};
+    char openai_raw[384] = {};
     if (httpd_query_key_value(query.c_str(), "ssid", ssid_raw, sizeof(ssid_raw)) != ESP_OK) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "SSID required");
     }
     (void)httpd_query_key_value(query.c_str(), "password", password_raw, sizeof(password_raw));
+    if (httpd_query_key_value(query.c_str(), "openai", openai_raw, sizeof(openai_raw)) != ESP_OK) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "OpenAI API key required");
+    }
 
     const std::string ssid = UrlDecode(ssid_raw);
     const std::string password = UrlDecode(password_raw);
-    if (ssid.empty() || ssid.size() > 32 || password.size() > 64) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid Wi-Fi settings");
+    const std::string openai = UrlDecode(openai_raw);
+    if (ssid.empty() || ssid.size() > 32 || password.size() > 64 ||
+        openai.empty() || openai.size() > 256) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid settings");
     }
-    if (!SaveCredentials(ssid, password)) {
+    if (!SaveCredentials(ssid, password) || !SaveOpenAiKey(openai)) {
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Save failed");
     }
 
