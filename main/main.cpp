@@ -11,6 +11,7 @@
 
 #include "axp2101.h"
 #include "beta_network.h"
+#include "beta_clanker.h"
 #include "beta_transcription.h"
 #include "board_es8311_codec.h"
 #include "driver/gpio.h"
@@ -242,7 +243,7 @@ void RenderIdle(const char* last_button, uint32_t press_count)
     auto* fb = s_panel->framebuffer();
     s_panel->Clear(true);
     DrawFrame(fb);
-    DrawText(fb, 105, 205, "PHASE 4", 4);
+    DrawText(fb, 105, 205, "PHASE 5", 4);
 
     const beta_network::Snapshot net = beta_network::GetSnapshot();
     if (net.mode == beta_network::Mode::kProvisioning) {
@@ -375,6 +376,42 @@ void RenderTranscriptionResult(const beta_transcription::Result& result)
     }
 }
 
+void RenderThinking()
+{
+    auto* fb = s_panel->framebuffer();
+    s_panel->Clear(true);
+    DrawFrame(fb);
+    DrawText(fb, 110, 250, "CLANKER", 4);
+    DrawText(fb, 95, 330, "THINKING", 4);
+    DrawText(fb, 75, 405, "PLEASE WAIT", 3);
+}
+
+void RenderClankerResult(const std::string& transcript,
+                         const beta_clanker::Result& result)
+{
+    auto* fb = s_panel->framebuffer();
+    s_panel->Clear(true);
+    DrawFrame(fb);
+
+    if (result.success) {
+        DrawText(fb, 82, 190, "CLANKER SAYS", 4);
+        DrawText(fb, 45, 265, "YOU:", 2);
+        DrawWrappedText(fb, 105, 265, transcript, 2, 24, 3);
+        DrawText(fb, 45, 395, "CLANKER:", 2);
+        DrawWrappedText(fb, 45, 440, result.response, 2, 30, 7);
+        DrawText(fb, 55, 690, "BOOT = ASK AGAIN", 2);
+    } else {
+        DrawText(fb, 82, 205, "CLANKER ERROR", 4);
+        char http[32] = {};
+        std::snprintf(http, sizeof(http), "HTTP: %d", result.http_status);
+        DrawText(fb, 60, 285, http, 2);
+        DrawWrappedText(fb, 48, 345,
+                        result.error_code + " " + result.error_message,
+                        2, 30, 6);
+        DrawText(fb, 55, 690, "BOOT = TRY AGAIN", 2);
+    }
+}
+
 void StartCapture()
 {
     s_clip.clear();
@@ -453,13 +490,24 @@ void FinishCapture()
         beta_transcription::TranscribePcm16(s_clip.data(), s_clip.size(), kAudioSampleRate);
     RenderTranscriptionResult(tx);
     (void)s_panel->RefreshFastBase();
+
+    if (!tx.success) {
+        return;
+    }
+
+    RenderThinking();
+    (void)s_panel->RefreshFastBase();
+
+    const beta_clanker::Result answer = beta_clanker::Ask(tx.transcript);
+    RenderClankerResult(tx.transcript, answer);
+    (void)s_panel->RefreshFastBase();
 }
 
 }  // namespace
 
 extern "C" void app_main(void)
 {
-    ESP_LOGI(kTag, "CLANKER Pocket BETA Phase 4 boot");
+    ESP_LOGI(kTag, "CLANKER Pocket BETA Phase 5 boot");
 
     if (InitPower() != ESP_OK || InitButtons() != ESP_OK) {
         ESP_LOGE(kTag, "Core hardware init failed");
