@@ -678,8 +678,7 @@ void DrawChatMessage(uint8_t* fb, int y, const ChatMessage& msg)
     const int x = msg.user ? 158 : 24;
     const int w = 298;
     DrawOutlineRect(fb, x, y, w, 124, 2);
-    DrawText(fb, x + 12, y + 10, msg.user ? "YOU" : "CLANKER", 2);
-    DrawWrappedText(fb, x + 12, y + 42, msg.text, 2, 22, 3);
+    DrawWrappedText(fb, x + 12, y + 16, msg.text, 2, 22, 4);
 }
 
 void DrawChatBody(uint8_t* fb)
