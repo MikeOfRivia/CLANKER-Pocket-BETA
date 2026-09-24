@@ -121,3 +121,24 @@ py -m esptool --chip esp32s3 --port COM4 run
 ```
 
 This preserves NVS.
+
+
+## Polish B - power + status
+
+Adds product power behavior without changing the proven voice/network/AI path.
+
+Behavior:
+- Short PWR press opens a power menu.
+- SELECT from the power menu reboots the ESP32.
+- Long PWR press (~2 s PMIC IRQ) renders a shutdown screen, stops audio, and requests AXP2101 power-off.
+- A 6-second PWR hold remains a hardware emergency-off path.
+- Status screen now includes battery percentage/charging state when available.
+- App-only updates remain the normal flashing path so NVS is preserved.
+
+Acceptance:
+- Short PWR reliably opens the power menu.
+- SELECT from that menu reboots and returns through the splash screen.
+- Long PWR shuts down cleanly on battery.
+- Device can be powered back on with the physical PWR key.
+- Battery/status display is sensible.
+- BOOT voice capture -> transcription -> CLANKER answer still works after reboot.
