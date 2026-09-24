@@ -92,3 +92,22 @@ Success criteria:
 ## Phase 6 - reader
 
 Add e-reader functionality only after the appliance foundation is stable.
+
+
+## Flashing policy
+
+Use the merged full image at address `0x0` only for first install or recovery. Because the merged image spans the NVS region, a full flash can clear saved Wi-Fi credentials and the OpenAI API key.
+
+For normal firmware updates on the established partition layout, flash only the application image:
+
+```powershell
+py -m esptool --chip esp32s3 --port COM4 write-flash 0x10000 .\clanker-pocket-beta-app.bin
+```
+
+Then reboot:
+
+```powershell
+py -m esptool --chip esp32s3 --port COM4 run
+```
+
+This preserves NVS.
