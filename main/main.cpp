@@ -101,9 +101,15 @@ bool s_reader_in_book = false;
 int s_reader_page = 0;
 int s_reader_page_turns = 0;
 bool s_swap_notice = false;
+bool s_settings_open = false;
+bool s_settings_notice = false;
+int s_settings_index = 0;
 
 constexpr int64_t kModeSwapNoticeUs = 1500000;
 constexpr int64_t kModeSwapCommitUs = 3000000;
+constexpr int64_t kSettingsNoticeUs = 1500000;
+constexpr int64_t kSettingsCommitUs = 3000000;
+constexpr int64_t kBootPttGraceUs = 250000;
 constexpr int kReaderFullRefreshEveryPages = 10;
 constexpr int kChatVisibleMessages = 4;
 
@@ -620,8 +626,12 @@ void DrawTab(uint8_t* fb, int x, const char* label, bool selected)
 void DrawTopBar(uint8_t* fb)
 {
     DrawText(fb, 20, 36, "CLANKER POCKET", 2);
-    DrawTab(fb, 286, "CHAT", s_ui_mode == UiMode::kChat);
-    DrawTab(fb, 378, "READ", s_ui_mode == UiMode::kRead);
+    if (s_settings_open) {
+        DrawText(fb, 322, 38, "SETTINGS", 2);
+    } else {
+        DrawTab(fb, 286, "CHAT", s_ui_mode == UiMode::kChat);
+        DrawTab(fb, 378, "READ", s_ui_mode == UiMode::kRead);
+    }
     FillRect(fb, 18, 92, kPortraitWidth - 36, 3, true);
 }
 
@@ -698,6 +708,50 @@ void DrawReadBody(uint8_t* fb)
     }
 }
 
+
+void DrawSettingsBody(uint8_t* fb)
+{
+    const beta_network::Snapshot net = beta_network::GetSnapshot();
+    const char* wifi =
+        net.mode == beta_network::Mode::kConnected ? "ONLINE" :
+        net.mode == beta_network::Mode::kProvisioning ? "SETUP" : "OFFLINE";
+
+    DrawText(fb, 28, 128, "SYSTEM", 3);
+    DrawText(fb, 28, 185, "WIFI", 2);
+    DrawText(fb, 190, 185, wifi, 2);
+    DrawText(fb, 28, 225, "OPENAI", 2);
+    DrawText(fb, 190, 225, beta_transcription::HasApiKey() ? "READY" : "MISSING", 2);
+
+    char battery[32] = {};
+    if (s_pmic && s_pmic->isBatteryConnect()) {
+        const int level = s_pmic->GetBatteryLevel();
+        if (level >= 0) std::snprintf(battery, sizeof(battery), "%d%%", level);
+        else std::snprintf(battery, sizeof(battery), "CONNECTED");
+    } else {
+        std::snprintf(battery, sizeof(battery), "NO PACK");
+    }
+    DrawText(fb, 28, 265, "BATTERY", 2);
+    DrawText(fb, 190, 265, battery, 2);
+
+    DrawDivider(fb, 320);
+    DrawText(fb, 28, 360, s_settings_index == 0 ? "> TEST HTTPS" : "  TEST HTTPS", 2);
+    DrawText(fb, 28, 415, s_settings_index == 1 ? "> CLEAN DISPLAY" : "  CLEAN DISPLAY", 2);
+    DrawText(fb, 28, 470, s_settings_index == 2 ? "> BACK" : "  BACK", 2);
+
+    DrawDivider(fb, 545);
+    DrawText(fb, 28, 585, "UP DOWN SELECT", 2);
+    DrawText(fb, 28, 625, "PRESS RADIAL TO OPEN", 2);
+}
+
+void DrawSettingsNotice(uint8_t* fb)
+{
+    if (!s_settings_notice) return;
+    FillRect(fb, 66, 316, 348, 128, false);
+    DrawOutlineRect(fb, 66, 316, 348, 128, 3);
+    DrawText(fb, 82, 345, "OPENING SETTINGS", 3);
+    DrawText(fb, 118, 398, "KEEP HOLDING", 2);
+}
+
 void DrawMenuOverlay(uint8_t* fb)
 {
     if (s_ui_menu == UiMenu::kNone) return;
@@ -722,10 +776,10 @@ void DrawMenuOverlay(uint8_t* fb)
 void DrawSwapOverlay(uint8_t* fb)
 {
     if (!s_swap_notice) return;
-    FillRect(fb, 58, 310, 364, 145, false);
-    FillRect(fb, 64, 316, 352, 133, true);
-    DrawText(fb, 86, 345, "SWAPPING MODE", 3);
-    DrawText(fb, 118, 400, "KEEP HOLDING", 2);
+    FillRect(fb, 66, 316, 348, 128, false);
+    DrawOutlineRect(fb, 66, 316, 348, 128, 3);
+    DrawText(fb, 91, 345, "SWAPPING MODE", 3);
+    DrawText(fb, 118, 398, "KEEP HOLDING", 2);
 }
 
 void RenderUi()
@@ -733,10 +787,15 @@ void RenderUi()
     auto* fb = s_panel->framebuffer();
     s_panel->Clear(true);
     DrawTopBar(fb);
-    if (s_ui_mode == UiMode::kChat) DrawChatBody(fb);
-    else DrawReadBody(fb);
-    DrawMenuOverlay(fb);
-    DrawSwapOverlay(fb);
+    if (s_settings_open) {
+        DrawSettingsBody(fb);
+    } else {
+        if (s_ui_mode == UiMode::kChat) DrawChatBody(fb);
+        else DrawReadBody(fb);
+        DrawMenuOverlay(fb);
+        DrawSwapOverlay(fb);
+        DrawSettingsNotice(fb);
+    }
 }
 
 void RefreshUiPartial()
@@ -749,6 +808,7 @@ void RefreshUiPartial()
 
 void ToggleMode()
 {
+    if (s_settings_open) return;
     s_ui_mode = s_ui_mode == UiMode::kChat ? UiMode::kRead : UiMode::kChat;
     s_ui_menu = UiMenu::kNone;
     s_menu_index = 0;
@@ -760,6 +820,14 @@ void ToggleMode()
 
 void HandleDirection(bool up)
 {
+    if (s_settings_open) {
+        if (up) s_settings_index = (s_settings_index + 2) % 3;
+        else s_settings_index = (s_settings_index + 1) % 3;
+        RenderUi();
+        RefreshUiPartial();
+        return;
+    }
+
     if (s_power_menu) {
         s_power_menu = false;
         RenderUi();
@@ -807,6 +875,23 @@ void HandleDirection(bool up)
 
 void HandleSelectShort()
 {
+    if (s_settings_open) {
+        if (s_settings_index == 0) {
+            beta_network::RunHttpsProbe();
+            RenderUi();
+            RefreshUiPartial();
+        } else if (s_settings_index == 1) {
+            RenderUi();
+            (void)s_panel->RefreshFullBase();
+        } else {
+            s_settings_open = false;
+            s_settings_index = 0;
+            RenderUi();
+            (void)s_panel->RefreshFastBase();
+        }
+        return;
+    }
+
     if (s_power_menu) {
         ESP_LOGI(kTag, "Power menu: reboot requested");
         RenderShuttingDown();
@@ -921,7 +1006,7 @@ void RenderClankerResult(const std::string& transcript,
 
 void StartCapture()
 {
-    if (s_ui_mode != UiMode::kChat || s_power_menu) return;
+    if (s_ui_mode != UiMode::kChat || s_power_menu || s_settings_open) return;
     s_clip.clear();
     s_last_capture = {};
     s_recording = true;
@@ -1067,7 +1152,11 @@ extern "C" void app_main(void)
 
     std::array<int, 4> last = {1,1,1,1};
     int64_t select_down_us = 0;
+    int64_t boot_down_us = 0;
+    int64_t settings_combo_started_us = 0;
     bool select_consumed = false;
+    bool boot_consumed = false;
+    bool settings_combo_consumed = false;
 
     while (true) {
         if (s_power_long_pending.exchange(false)) {
@@ -1091,22 +1180,73 @@ extern "C" void app_main(void)
         }
 
         const int boot_now = gpio_get_level(kButtonBoot);
-        if (last[0] == 1 && boot_now == 0 && s_ui_mode == UiMode::kChat && !s_power_menu) {
+        const int select_now = gpio_get_level(kButtonSelect);
+
+        if (last[0] == 1 && boot_now == 0) {
+            boot_down_us = esp_timer_get_time();
+            boot_consumed = false;
+        }
+        if (last[2] == 1 && select_now == 0) {
+            select_down_us = esp_timer_get_time();
+            select_consumed = false;
+            s_swap_notice = false;
+        }
+
+        const bool settings_combo =
+            boot_now == 0 && select_now == 0 && !s_power_menu && !s_recording;
+        if (settings_combo) {
+            if (settings_combo_started_us == 0) {
+                settings_combo_started_us = esp_timer_get_time();
+                s_swap_notice = false;
+                s_settings_notice = false;
+            }
+            const int64_t combo_us = esp_timer_get_time() - settings_combo_started_us;
+            if (combo_us >= kSettingsNoticeUs && !s_settings_notice) {
+                s_settings_notice = true;
+                RenderUi();
+                RefreshUiPartial();
+            }
+            if (combo_us >= kSettingsCommitUs && !settings_combo_consumed) {
+                settings_combo_consumed = true;
+                select_consumed = true;
+                boot_consumed = true;
+                s_settings_notice = false;
+                s_settings_open = !s_settings_open;
+                s_ui_menu = UiMenu::kNone;
+                s_settings_index = 0;
+                RenderUi();
+                (void)s_panel->RefreshFastBase();
+            }
+        } else if (settings_combo_started_us != 0) {
+            if (!settings_combo_consumed && s_settings_notice) {
+                s_settings_notice = false;
+                RenderUi();
+                RefreshUiPartial();
+            }
+            settings_combo_started_us = 0;
+            settings_combo_consumed = false;
+        }
+
+        if (!s_recording && boot_now == 0 && select_now == 1 &&
+            boot_down_us != 0 && !boot_consumed && !s_settings_open &&
+            s_ui_mode == UiMode::kChat && !s_power_menu &&
+            (esp_timer_get_time() - boot_down_us) >= kBootPttGraceUs) {
+            boot_consumed = true;
             StartCapture();
         }
+
         if (s_recording && boot_now == 0) PumpCapture();
-        if (last[0] == 0 && boot_now == 1 && s_recording) FinishCapture();
+
+        if (last[0] == 0 && boot_now == 1) {
+            if (s_recording) FinishCapture();
+            boot_down_us = 0;
+            boot_consumed = false;
+        }
         last[0] = boot_now;
 
         if (!s_recording) {
-            const int select_now = gpio_get_level(kButtonSelect);
-            if (last[2] == 1 && select_now == 0) {
-                select_down_us = esp_timer_get_time();
-                select_consumed = false;
-                s_swap_notice = false;
-            }
-
-            if (select_now == 0 && select_down_us != 0 && !select_consumed && !s_power_menu) {
+            if (select_now == 0 && boot_now == 1 && select_down_us != 0 &&
+                !select_consumed && !s_power_menu && !s_settings_open) {
                 const int64_t held_us = esp_timer_get_time() - select_down_us;
                 if (held_us >= kModeSwapNoticeUs && !s_swap_notice) {
                     s_swap_notice = true;
@@ -1120,7 +1260,7 @@ extern "C" void app_main(void)
             }
 
             if (last[2] == 0 && select_now == 1) {
-                if (!select_consumed) {
+                if (!select_consumed && boot_now == 1) {
                     if (s_swap_notice) {
                         s_swap_notice = false;
                         RenderUi();
