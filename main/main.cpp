@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "axp2101.h"
+#include "beta_network.h"
 #include "board_es8311_codec.h"
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
@@ -83,6 +84,7 @@ struct Glyph {
 
 constexpr Glyph kFont[] = {
     {' ', {0,0,0,0,0,0,0}}, {'-', {0,0,0,31,0,0,0}}, {':', {0,4,0,0,4,0,0}},
+    {'.', {0,0,0,0,0,12,12}},
     {'0', {14,17,19,21,25,17,14}}, {'1', {4,12,4,4,4,4,14}},
     {'2', {14,17,1,2,4,8,31}}, {'3', {30,1,1,14,1,1,30}},
     {'4', {2,6,10,18,31,2,2}}, {'5', {31,16,16,30,1,1,30}},
@@ -237,16 +239,37 @@ void RenderIdle(const char* last_button, uint32_t press_count)
     auto* fb = s_panel->framebuffer();
     s_panel->Clear(true);
     DrawFrame(fb);
-    DrawText(fb, 105, 230, "PHASE 2", 4);
-    DrawText(fb, 72, 290, "MIC CAPTURE READY", 3);
-    DrawText(fb, 65, 380, "LAST BUTTON:", 3);
-    DrawText(fb, 95, 430, last_button, 4);
+    DrawText(fb, 105, 205, "PHASE 3", 4);
+
+    const beta_network::Snapshot net = beta_network::GetSnapshot();
+    if (net.mode == beta_network::Mode::kProvisioning) {
+        DrawText(fb, 55, 275, "WIFI PROVISIONING", 3);
+        DrawText(fb, 45, 325, net.ap_name.c_str(), 3);
+        DrawText(fb, 65, 375, "OPEN 192.168.4.1", 2);
+    } else if (net.mode == beta_network::Mode::kConnected) {
+        DrawText(fb, 70, 275, "WIFI CONNECTED", 3);
+        char http[32] = {};
+        if (net.http_status > 0) {
+            std::snprintf(http, sizeof(http), "HTTPS STATUS: %d", net.http_status);
+        } else if (!net.probe_error.empty()) {
+            std::snprintf(http, sizeof(http), "HTTPS ERROR");
+        } else {
+            std::snprintf(http, sizeof(http), "HTTPS NOT TESTED");
+        }
+        DrawText(fb, 48, 325, http, 2);
+    } else {
+        DrawText(fb, 85, 275, "WIFI OFFLINE", 3);
+    }
+
+    DrawText(fb, 65, 430, "LAST BUTTON:", 3);
+    DrawText(fb, 95, 480, last_button, 4);
 
     char count[16] = {};
     std::snprintf(count, sizeof(count), "%lu", static_cast<unsigned long>(press_count));
-    DrawText(fb, 110, 520, "PRESS COUNT:", 3);
-    DrawText(fb, 200, 570, count, 4);
-    DrawText(fb, 65, 690, "HOLD BOOT TO RECORD", 2);
+    DrawText(fb, 110, 550, "PRESS COUNT:", 3);
+    DrawText(fb, 200, 600, count, 4);
+    DrawText(fb, 50, 675, "BOOT RECORDS", 2);
+    DrawText(fb, 50, 710, "SELECT RETESTS HTTPS", 2);
 }
 
 void RenderRecording()
@@ -362,6 +385,12 @@ extern "C" void app_main(void)
         return;
     }
 
+    const esp_err_t network_err = beta_network::Init();
+    if (network_err != ESP_OK) {
+        ESP_LOGW(kTag, "Network init returned: %s", esp_err_to_name(network_err));
+    }
+    beta_network::RunHttpsProbe();
+
     uint32_t press_count = 0;
     RenderIdle("NONE", press_count);
     if (s_panel->RefreshFullBase() != ESP_OK) {
@@ -397,6 +426,9 @@ extern "C" void app_main(void)
                     ++press_count;
                     ESP_LOGI(kTag, "Button %s pressed (%lu)", ButtonName(static_cast<int>(i)),
                              static_cast<unsigned long>(press_count));
+                    if (pins[i] == kButtonSelect) {
+                        beta_network::RunHttpsProbe();
+                    }
                     RenderIdle(ButtonName(static_cast<int>(i)), press_count);
                     (void)s_panel->RefreshFastBase();
                 }
