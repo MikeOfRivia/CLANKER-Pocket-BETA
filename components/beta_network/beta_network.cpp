@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstring>
 #include <mutex>
 #include <string>
 
 #include "esp_crt_bundle.h"
+#include "esp_check.h"
 #include "esp_event.h"
 #include "esp_http_client.h"
 #include "esp_http_server.h"
@@ -180,7 +182,7 @@ esp_err_t StartProvisioningAp()
     uint8_t mac[6] = {};
     esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
     char ap_name[32] = {};
-    std::snprintf(ap_name, sizeof(ap_name), "ClankerBeta-%02X%02X%02X",
+    std::snprintf(ap_name, sizeof(ap_name), "CLANKERBETA-%02X%02X%02X",
                   mac[3], mac[4], mac[5]);
 
     wifi_config_t ap = {};
