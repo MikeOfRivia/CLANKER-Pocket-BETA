@@ -37,7 +37,7 @@ Success criteria:
 - Peak and RMS are non-zero when speaking.
 - Radial Up / Select / Down still work after recording.
 
-## Phase 3 - network — CURRENT
+## Phase 3 - network — PASSED
 
 If no saved Wi-Fi credentials exist, the device starts an open provisioning AP named `CLANKERBETA-XXXXXX` and shows `192.168.4.1` on-screen. Enter SSID/password there; the device saves them to NVS and reboots.
 
@@ -50,9 +50,25 @@ Success criteria:
 - BOOT microphone capture still works.
 - Up / Select / Down remain responsive after both recording and HTTPS activity.
 
-## Phase 4 - OpenAI transcription
+## Phase 4 - OpenAI transcription — CURRENT
 
-Send the already-proven PCM clip and display request phase, HTTP status and raw error/result.
+Provisioning now collects Wi-Fi credentials and an OpenAI API key together.
+
+After BOOT capture completes:
+1. The previously proven PCM remains in PSRAM.
+2. The device renders `TRANSCRIBING`.
+3. It synchronously sends a WAV multipart request to OpenAI using `gpt-4o-mini-transcribe`.
+4. It renders the actual HTTP status and either transcript text or the provider/transport error.
+
+This phase is deliberately synchronous. While the HTTP request is active, button input is blocked. That is acceptable for bring-up because it removes task/callback/state-machine coupling while we prove the complete audio -> TLS -> OpenAI path.
+
+Success criteria:
+- Provisioning saves both Wi-Fi and API key.
+- A spoken clip produces a non-empty transcript.
+- HTTP status is visible.
+- Failure details are visible instead of hidden.
+- Multiple capture/transcribe cycles work consecutively.
+- Up / Select / Down remain usable after a completed request.
 
 ## Phase 5 - CLANKER
 
