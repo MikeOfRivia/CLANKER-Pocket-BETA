@@ -29,7 +29,7 @@ std::string LoadStoredProviderKey()
 
 namespace beta_clanker {
 
-Result Ask(const std::string& transcript)
+Result Ask(const std::string& transcript, const std::string& previous_response_id)
 {
     Result result = {};
     if (transcript.empty()) {
@@ -50,6 +50,9 @@ Result Ask(const std::string& transcript)
     cJSON_AddStringToObject(request, "instructions",
         "You are CLANKER Pocket. Answer directly and concisely in one or two short sentences.");
     cJSON_AddStringToObject(request, "input", transcript.c_str());
+    if (!previous_response_id.empty()) {
+        cJSON_AddStringToObject(request, "previous_response_id", previous_response_id.c_str());
+    }
     cJSON_AddNumberToObject(request, "max_output_tokens", 160);
 
     char* raw = cJSON_PrintUnformatted(request);
@@ -130,6 +133,10 @@ Result Ask(const std::string& transcript)
 
     cJSON* root = cJSON_ParseWithLength(response_body.c_str(), response_body.size());
     if (result.http_status >= 200 && result.http_status < 300 && root) {
+        cJSON* response_id = cJSON_GetObjectItemCaseSensitive(root, "id");
+        if (cJSON_IsString(response_id) && response_id->valuestring) {
+            result.response_id = response_id->valuestring;
+        }
         cJSON* output = cJSON_GetObjectItemCaseSensitive(root, "output");
         if (cJSON_IsArray(output)) {
             cJSON* item = nullptr;
