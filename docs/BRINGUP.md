@@ -50,7 +50,7 @@ Success criteria:
 - BOOT microphone capture still works.
 - Up / Select / Down remain responsive after both recording and HTTPS activity.
 
-## Phase 4 - OpenAI transcription — CURRENT
+## Phase 4 - OpenAI transcription — PASSED
 
 Provisioning now collects Wi-Fi credentials and an OpenAI API key together.
 
@@ -70,9 +70,24 @@ Success criteria:
 - Multiple capture/transcribe cycles work consecutively.
 - Up / Select / Down remain usable after a completed request.
 
-## Phase 5 - CLANKER
+## Phase 5 - CLANKER — CURRENT
 
-Add response backend and interaction UI.
+After a successful transcription, the transcript is sent for a concise CLANKER text response.
+
+The device renders:
+- CLANKER THINKING while the request is active
+- the recognized user text
+- the CLANKER response
+- HTTP/error details if the response request fails
+
+The response is intentionally short for the 480x800 e-paper display.
+
+Success criteria:
+- Spoken request transcribes correctly.
+- CLANKER returns a non-empty response.
+- The response renders legibly.
+- Multiple ask cycles work consecutively.
+- Recording, networking, transcription, and buttons still work afterward.
 
 ## Phase 6 - reader
 
