@@ -70,7 +70,7 @@ Success criteria:
 - Multiple capture/transcribe cycles work consecutively.
 - Up / Select / Down remain usable after a completed request.
 
-## Phase 5 - CLANKER — CURRENT
+## Phase 5 - CLANKER — PASSED
 
 After a successful transcription, the transcript is sent for a concise CLANKER text response.
 
@@ -89,9 +89,19 @@ Success criteria:
 - Multiple ask cycles work consecutively.
 - Recording, networking, transcription, and buttons still work afterward.
 
-## Phase 6 - reader
+## Phase 6 - reader — NEXT
 
-Add e-reader functionality only after the appliance foundation is stable.
+The appliance foundation is now physically proven end-to-end:
+- display
+- direct controls
+- microphone capture
+- Wi-Fi provisioning and reconnect
+- HTTPS/TLS
+- OpenAI transcription
+- CLANKER response generation
+- on-device answer rendering
+
+Reader functionality can now be evaluated and added without using it as a foundation for the core appliance.
 
 
 ## Flashing policy
