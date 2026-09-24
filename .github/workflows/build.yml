@@ -1,0 +1,44 @@
+name: Build CLANKER Pocket BETA
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:v5.5.4
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build firmware
+        shell: bash
+        run: |
+          . $IDF_PATH/export.sh
+          idf.py set-target esp32s3
+          idf.py build
+
+      - name: Create full flash image
+        shell: bash
+        run: |
+          . $IDF_PATH/export.sh
+          cd build
+          python -m esptool --chip esp32s3 merge_bin -o clanker-pocket-beta-full.bin \
+            --flash_mode qio --flash_freq 80m --flash_size 16MB $(cat flash_args)
+          cp clanker_pocket_beta.bin clanker-pocket-beta-app.bin
+
+      - name: Package firmware
+        shell: bash
+        run: |
+          mkdir -p artifact
+          cp build/clanker-pocket-beta-full.bin artifact/
+          cp build/clanker-pocket-beta-app.bin artifact/
+          cp build/flash_args artifact/
+          cp partitions.csv artifact/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clanker-pocket-beta
+          path: artifact/
