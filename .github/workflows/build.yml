@@ -2,7 +2,7 @@ name: Build CLANKER Pocket BETA
 
 on:
   push:
-    branches: [ main, feature/chat-read-ui ]
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
