@@ -37,6 +37,18 @@ jobs:
           cp build/clanker-pocket-beta-app.bin artifact/
           cp build/flash_args artifact/
           cp partitions.csv artifact/
+          cat > artifact/FLASHING.txt <<'EOF'
+          CLANKER Pocket BETA flashing guide
+
+          FIRST INSTALL / RECOVERY (ERASES SAVED NVS SETTINGS):
+            py -m esptool --chip esp32s3 --port COM4 write-flash 0x0 .\clanker-pocket-beta-full.bin
+
+          NORMAL UPDATE (PRESERVES SAVED WIFI + API KEY):
+            py -m esptool --chip esp32s3 --port COM4 write-flash 0x10000 .\clanker-pocket-beta-app.bin
+
+          Then reboot:
+            py -m esptool --chip esp32s3 --port COM4 run
+          EOF
 
       - uses: actions/upload-artifact@v4
         with:
