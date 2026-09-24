@@ -623,6 +623,9 @@ extern "C" void app_main(void)
         ESP_LOGE(kTag, "Splash refresh failed");
         return;
     }
+    // Give the branded boot screen enough dwell time to actually be seen on e-paper
+    // before initialization advances to the home screen.
+    vTaskDelay(pdMS_TO_TICKS(1800));
 
     if (InitAudio() != ESP_OK) {
         ESP_LOGE(kTag, "Audio init failed");
