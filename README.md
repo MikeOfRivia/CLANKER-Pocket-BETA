@@ -2,18 +2,34 @@
 
 Clean-room firmware for the Waveshare ESP32-S3 e-Paper 3.97" board.
 
-## Build philosophy
+This repository is intentionally **not** a continuation of the FolloUp application architecture. The previous CLANKER Pocket repository is reference material only. Hardware-specific driver code may be reused where it is useful, but behavior is rebuilt from simple, independently testable primitives.
 
-This repo intentionally starts small. Hardware primitives are proven one at a time before higher-level UI or application behavior is added.
+## Current milestone: Phase 1
 
-Initial bring-up order:
+The first firmware proves only:
 
-1. Boot and e-paper display
-2. Physical buttons
-3. Microphone capture
-4. Wi-Fi / HTTPS
-5. OpenAI transcription
-6. CLANKER interaction layer
-7. E-reader features
+- AXP2101 power rails
+- SSD1677 800x480 e-paper initialization and refresh
+- BOOT on GPIO0
+- radial Up on GPIO4
+- radial Select on GPIO5
+- radial Down on GPIO6
 
-The previous FolloUp-derived repository is reference material only; this repository is the product rebuild.
+The screen boots into a dedicated hardware-test page. Every button press must update the button name and press counter directly on the e-paper display.
+
+There is deliberately **no Wi-Fi, no microphone, no input dispatcher, no recording session service, no overlays, no navigation framework, and no inherited application state machine** in Phase 1.
+
+See `docs/BRINGUP.md` for the gated build plan and `docs/HARDWARE.md` for the hardware contract.
+
+## Build
+
+CI builds with ESP-IDF 5.5.4 and produces:
+
+- `clanker-pocket-beta-full.bin` — complete flash image for address `0x0`
+- `clanker-pocket-beta-app.bin` — app image only
+
+For the first BETA flash, use the **full image at 0x0** so the bootloader and new single-factory partition table match this repo.
+
+## Rule
+
+A layer does not graduate because it compiles. It graduates only after it is visibly proven on the physical device.
