@@ -233,6 +233,29 @@ bool DrawEmbeddedLogo(uint8_t* fb, int x, int y)
     return true;
 }
 
+bool DrawEmbeddedWordmark(uint8_t* fb, int x, int y, int max_h = 54)
+{
+    const size_t bytes = static_cast<size_t>(kLogoEnd - kLogoStart);
+    if (bytes < sizeof(Cpr1Header)) return false;
+
+    const auto* header = reinterpret_cast<const Cpr1Header*>(kLogoStart);
+    if (std::memcmp(header->magic, "CPR1", 4) != 0) return false;
+
+    const size_t required =
+        sizeof(Cpr1Header) + static_cast<size_t>(header->run_count) * sizeof(Cpr1Run);
+    if (required > bytes) return false;
+
+    // The logo's text is at the top of the embedded artwork. Clip that region only.
+    const auto* runs =
+        reinterpret_cast<const Cpr1Run*>(kLogoStart + sizeof(Cpr1Header));
+    for (uint32_t i = 0; i < header->run_count; ++i) {
+        const Cpr1Run& run = runs[i];
+        if (run.y >= max_h) continue;
+        FillRect(fb, x + run.x, y + run.y, run.length, 1, true);
+    }
+    return true;
+}
+
 void DrawDivider(uint8_t* fb, int y)
 {
     FillRect(fb, 42, y, kPortraitWidth - 84, 3, true);
@@ -637,7 +660,9 @@ void DrawTab(uint8_t* fb, int x, const char* label, bool selected)
 
 void DrawTopBar(uint8_t* fb)
 {
-    DrawText(fb, 20, 36, "CLANKER POCKET", 2);
+    if (!DrawEmbeddedWordmark(fb, 18, 22, 52)) {
+        DrawText(fb, 18, 36, "CLANKERpocket", 2);
+    }
     if (s_settings_open) {
         DrawText(fb, 322, 38, "SETTINGS", 2);
     } else {
