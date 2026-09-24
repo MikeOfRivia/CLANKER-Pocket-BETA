@@ -15,6 +15,7 @@
 #include "beta_clanker.h"
 #include "beta_transcription.h"
 #include "board_es8311_codec.h"
+#include "clanker_brand_assets.h"
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "driver/spi_master.h"
@@ -233,27 +234,25 @@ bool DrawEmbeddedLogo(uint8_t* fb, int x, int y)
     return true;
 }
 
-bool DrawEmbeddedWordmark(uint8_t* fb, int x, int y, int max_h = 54)
+void DrawBrandRuns(uint8_t* fb, int x, int y,
+                   const BrandRun* runs, size_t run_count)
 {
-    const size_t bytes = static_cast<size_t>(kLogoEnd - kLogoStart);
-    if (bytes < sizeof(Cpr1Header)) return false;
-
-    const auto* header = reinterpret_cast<const Cpr1Header*>(kLogoStart);
-    if (std::memcmp(header->magic, "CPR1", 4) != 0) return false;
-
-    const size_t required =
-        sizeof(Cpr1Header) + static_cast<size_t>(header->run_count) * sizeof(Cpr1Run);
-    if (required > bytes) return false;
-
-    // The logo's text is at the top of the embedded artwork. Clip that region only.
-    const auto* runs =
-        reinterpret_cast<const Cpr1Run*>(kLogoStart + sizeof(Cpr1Header));
-    for (uint32_t i = 0; i < header->run_count; ++i) {
-        const Cpr1Run& run = runs[i];
-        if (run.y >= max_h) continue;
-        FillRect(fb, x + run.x, y + run.y, run.length, 1, true);
+    if (!fb || !runs) return;
+    for (size_t i = 0; i < run_count; ++i) {
+        FillRect(fb, x + runs[i].x, y + runs[i].y, runs[i].len, 1, true);
     }
-    return true;
+}
+
+void DrawClankerHead(uint8_t* fb, int x, int y)
+{
+    DrawBrandRuns(fb, x, y, kClankerHeadRuns,
+                  sizeof(kClankerHeadRuns) / sizeof(kClankerHeadRuns[0]));
+}
+
+void DrawClankerWordmark(uint8_t* fb, int x, int y)
+{
+    DrawBrandRuns(fb, x, y, kClankerWordmarkRuns,
+                  sizeof(kClankerWordmarkRuns) / sizeof(kClankerWordmarkRuns[0]));
 }
 
 void DrawDivider(uint8_t* fb, int y)
@@ -266,21 +265,12 @@ void RenderSplash()
     auto* fb = s_panel->framebuffer();
     s_panel->Clear(true);
 
-    const auto* header = reinterpret_cast<const Cpr1Header*>(kLogoStart);
-    int logo_x = 30;
-    int logo_y = 145;
-    if (static_cast<size_t>(kLogoEnd - kLogoStart) >= sizeof(Cpr1Header) &&
-        std::memcmp(header->magic, "CPR1", 4) == 0) {
-        logo_x = (kPortraitWidth - header->width) / 2;
-    }
-    if (!DrawEmbeddedLogo(fb, logo_x, logo_y)) {
-        DrawText(fb, 48, 230, "CLANKER", 6);
-        DrawText(fb, 78, 300, "POCKET", 4);
-    }
+    DrawClankerHead(fb, (kPortraitWidth - kClankerHeadWidth) / 2, 105);
+    DrawClankerWordmark(fb, (kPortraitWidth - kClankerWordmarkWidth) / 2, 270);
 
-    DrawDivider(fb, 505);
-    DrawText(fb, 177, 555, "BETA", 4);
-    DrawText(fb, 135, 630, "STARTING", 3);
+    DrawDivider(fb, 355);
+    DrawText(fb, 177, 405, "BETA", 4);
+    DrawText(fb, 135, 480, "STARTING", 3);
 }
 
 void RenderHome()
@@ -392,21 +382,12 @@ void RenderShuttingDown()
     auto* fb = s_panel->framebuffer();
     s_panel->Clear(true);
 
-    const auto* header = reinterpret_cast<const Cpr1Header*>(kLogoStart);
-    int logo_x = 30;
-    const int logo_y = 135;
-    if (static_cast<size_t>(kLogoEnd - kLogoStart) >= sizeof(Cpr1Header) &&
-        std::memcmp(header->magic, "CPR1", 4) == 0) {
-        logo_x = (kPortraitWidth - header->width) / 2;
-    }
-    if (!DrawEmbeddedLogo(fb, logo_x, logo_y)) {
-        DrawText(fb, 48, 220, "CLANKER", 6);
-        DrawText(fb, 78, 290, "POCKET", 4);
-    }
+    DrawClankerHead(fb, (kPortraitWidth - kClankerHeadWidth) / 2, 90);
+    DrawClankerWordmark(fb, (kPortraitWidth - kClankerWordmarkWidth) / 2, 250);
 
-    DrawDivider(fb, 500);
-    DrawText(fb, 105, 550, "POWERED DOWN", 4);
-    DrawText(fb, 78, 625, "PRESS POWER TO REVIVE", 2);
+    DrawDivider(fb, 335);
+    DrawText(fb, 105, 390, "POWERED DOWN", 4);
+    DrawText(fb, 78, 465, "PRESS POWER TO REVIVE", 2);
 }
 
 EpaperPanelConfig PanelConfig()
@@ -660,9 +641,7 @@ void DrawTab(uint8_t* fb, int x, const char* label, bool selected)
 
 void DrawTopBar(uint8_t* fb)
 {
-    if (!DrawEmbeddedWordmark(fb, 18, 22, 52)) {
-        DrawText(fb, 18, 36, "CLANKERpocket", 2);
-    }
+    DrawClankerWordmark(fb, 18, 31);
     if (s_settings_open) {
         DrawText(fb, 322, 38, "SETTINGS", 2);
     } else {
