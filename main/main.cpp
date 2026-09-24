@@ -634,20 +634,49 @@ void ClearChat()
 
 void DrawTab(uint8_t* fb, int x, const char* label, bool selected)
 {
-    DrawOutlineRect(fb, x, 24, 82, 48, selected ? 4 : 2);
-    DrawText(fb, x + 14, 38, label, 2);
-    if (selected) FillRect(fb, x + 8, 66, 66, 4, true);
+    constexpr int kTabWidth = 62;
+    constexpr int kTabHeight = 48;
+    DrawOutlineRect(fb, x, 24, kTabWidth, kTabHeight, selected ? 4 : 2);
+    DrawText(fb, x + 7, 38, label, 2);
+    if (selected) FillRect(fb, x + 6, 66, kTabWidth - 12, 4, true);
+}
+
+void DrawBatteryIndicator(uint8_t* fb)
+{
+    int level = -1;
+    if (s_pmic && s_pmic->isBatteryConnect()) {
+        level = s_pmic->GetBatteryLevel();
+    }
+
+    const int x = 414;
+    const int y = 31;
+    const int w = 46;
+    const int h = 24;
+    DrawOutlineRect(fb, x, y, w, h, 2);
+    FillRect(fb, x + w, y + 7, 4, 10, true);
+
+    if (level < 0) return;
+
+    int segments = 0;
+    if (level >= 15) segments = 1;
+    if (level >= 45) segments = 2;
+    if (level >= 75) segments = 3;
+
+    for (int i = 0; i < segments; ++i) {
+        FillRect(fb, x + 5 + i * 12, y + 5, 9, h - 10, true);
+    }
 }
 
 void DrawTopBar(uint8_t* fb)
 {
-    DrawClankerWordmark(fb, 18, 31);
+    DrawClankerWordmark(fb, 12, 31);
     if (s_settings_open) {
-        DrawText(fb, 322, 38, "SETTINGS", 2);
+        DrawText(fb, 302, 38, "SETTINGS", 2);
     } else {
-        DrawTab(fb, 286, "CHAT", s_ui_mode == UiMode::kChat);
-        DrawTab(fb, 378, "READ", s_ui_mode == UiMode::kRead);
+        DrawTab(fb, 272, "CHAT", s_ui_mode == UiMode::kChat);
+        DrawTab(fb, 340, "READ", s_ui_mode == UiMode::kRead);
     }
+    DrawBatteryIndicator(fb);
     FillRect(fb, 18, 92, kPortraitWidth - 36, 3, true);
 }
 
