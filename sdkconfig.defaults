@@ -22,3 +22,6 @@ CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG=y
 
 # ES8311 / esp_codec_dev uses the current I2C master-bus API.
 CONFIG_CODEC_I2C_BACKWARD_COMPATIBLE=n
+
+# TLS trust store for HTTPS bring-up probe.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
