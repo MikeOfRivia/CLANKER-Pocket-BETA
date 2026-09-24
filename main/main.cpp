@@ -1,14 +1,17 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "axp2101.h"
 #include "beta_network.h"
+#include "beta_transcription.h"
 #include "board_es8311_codec.h"
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
@@ -239,7 +242,7 @@ void RenderIdle(const char* last_button, uint32_t press_count)
     auto* fb = s_panel->framebuffer();
     s_panel->Clear(true);
     DrawFrame(fb);
-    DrawText(fb, 105, 205, "PHASE 3", 4);
+    DrawText(fb, 105, 205, "PHASE 4", 4);
 
     const beta_network::Snapshot net = beta_network::GetSnapshot();
     if (net.mode == beta_network::Mode::kProvisioning) {
@@ -269,7 +272,7 @@ void RenderIdle(const char* last_button, uint32_t press_count)
     DrawText(fb, 110, 550, "PRESS COUNT:", 3);
     DrawText(fb, 200, 600, count, 4);
     DrawText(fb, 50, 675, "BOOT RECORDS", 2);
-    DrawText(fb, 50, 710, "SELECT RETESTS HTTPS", 2);
+    DrawText(fb, 42, 710, "SELECT RETESTS HTTPS", 2);
 }
 
 void RenderRecording()
@@ -299,6 +302,77 @@ void RenderCaptureStats(const CaptureStats& stats)
     DrawText(fb, 58, 465, line, 3);
     DrawText(fb, 58, 535, stats.clipped ? "BUFFER LIMIT HIT" : "RAW PCM STORED", 3);
     DrawText(fb, 55, 680, "BOOT = RECORD AGAIN", 2);
+}
+
+std::string DisplaySafeUpper(std::string text)
+{
+    for (char& ch : text) {
+        const unsigned char uch = static_cast<unsigned char>(ch);
+        if (std::islower(uch)) {
+            ch = static_cast<char>(std::toupper(uch));
+        } else if (!(std::isupper(uch) || std::isdigit(uch) || ch == ' ' ||
+                     ch == '-' || ch == ':' || ch == '.')) {
+            ch = ' ';
+        }
+    }
+    return text;
+}
+
+void DrawWrappedText(uint8_t* fb, int x, int y, const std::string& input,
+                     int scale, int max_chars, int max_lines)
+{
+    std::string text = DisplaySafeUpper(input);
+    size_t pos = 0;
+    int line = 0;
+    while (pos < text.size() && line < max_lines) {
+        while (pos < text.size() && text[pos] == ' ') ++pos;
+        if (pos >= text.size()) break;
+
+        size_t end = std::min(text.size(), pos + static_cast<size_t>(max_chars));
+        if (end < text.size()) {
+            const size_t space = text.rfind(' ', end);
+            if (space != std::string::npos && space > pos) end = space;
+        }
+        std::string chunk = text.substr(pos, end - pos);
+        DrawText(fb, x, y + line * (8 * scale + 8), chunk.c_str(), scale);
+        pos = end;
+        ++line;
+    }
+}
+
+void RenderTranscribing()
+{
+    auto* fb = s_panel->framebuffer();
+    s_panel->Clear(true);
+    DrawFrame(fb);
+    DrawText(fb, 95, 260, "TRANSCRIBING", 4);
+    DrawText(fb, 72, 345, "OPENAI REQUEST ACTIVE", 2);
+    DrawText(fb, 80, 395, "PLEASE WAIT", 3);
+}
+
+void RenderTranscriptionResult(const beta_transcription::Result& result)
+{
+    auto* fb = s_panel->framebuffer();
+    s_panel->Clear(true);
+    DrawFrame(fb);
+
+    if (result.success) {
+        DrawText(fb, 75, 205, "TRANSCRIPT OK", 4);
+        char http[32] = {};
+        std::snprintf(http, sizeof(http), "HTTP: %d", result.http_status);
+        DrawText(fb, 60, 285, http, 2);
+        DrawWrappedText(fb, 48, 345, result.transcript, 2, 30, 7);
+        DrawText(fb, 55, 690, "BOOT = RECORD AGAIN", 2);
+    } else {
+        DrawText(fb, 55, 205, "TRANSCRIPTION FAILED", 3);
+        char http[32] = {};
+        std::snprintf(http, sizeof(http), "HTTP: %d", result.http_status);
+        DrawText(fb, 60, 285, http, 2);
+        DrawWrappedText(fb, 48, 345,
+                        result.error_code + " " + result.error_message,
+                        2, 30, 6);
+        DrawText(fb, 55, 690, "BOOT = TRY AGAIN", 2);
+    }
 }
 
 void StartCapture()
@@ -361,13 +435,31 @@ void FinishCapture()
 
     RenderCaptureStats(s_last_capture);
     (void)s_panel->RefreshFastBase();
+
+    const beta_network::Snapshot net = beta_network::GetSnapshot();
+    if (net.mode != beta_network::Mode::kConnected) {
+        ESP_LOGW(kTag, "Skipping transcription: Wi-Fi not connected");
+        return;
+    }
+    if (!beta_transcription::HasApiKey()) {
+        ESP_LOGW(kTag, "Skipping transcription: OpenAI key missing");
+        return;
+    }
+
+    RenderTranscribing();
+    (void)s_panel->RefreshFastBase();
+
+    const beta_transcription::Result tx =
+        beta_transcription::TranscribePcm16(s_clip.data(), s_clip.size(), kAudioSampleRate);
+    RenderTranscriptionResult(tx);
+    (void)s_panel->RefreshFastBase();
 }
 
 }  // namespace
 
 extern "C" void app_main(void)
 {
-    ESP_LOGI(kTag, "CLANKER Pocket BETA Phase 2 boot");
+    ESP_LOGI(kTag, "CLANKER Pocket BETA Phase 4 boot");
 
     if (InitPower() != ESP_OK || InitButtons() != ESP_OK) {
         ESP_LOGE(kTag, "Core hardware init failed");
