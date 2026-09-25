@@ -298,7 +298,7 @@ void RenderSplash()
 
     DrawDivider(fb, 355);
     DrawText(fb, 177, 405, "BETA", 4);
-    DrawText(fb, 135, 480, "STARTING", 3);
+    DrawText(fb, 102, 480, "POWERING UP!", 3);
 }
 
 void RenderHome()
@@ -790,62 +790,92 @@ int ChatMessageHeight(const ChatMessage& msg)
     return kPadTop + ChatMessageLineCount(msg) * kLineStep + kPadBottom;
 }
 
-void DrawChatMessage(uint8_t* fb, int y, const ChatMessage& msg)
+int ChatTranscriptHeight()
 {
+    constexpr int kGap = 10;
+    int height = 0;
+    for (size_t i = 0; i < s_chat_messages.size(); ++i) {
+        if (i > 0) height += kGap;
+        height += ChatMessageHeight(s_chat_messages[i]);
+    }
+    return height;
+}
+
+int ChatMaxScrollLines()
+{
+    constexpr int kBodyTop = 112;
+    constexpr int kBodyBottom = 688;
+    constexpr int kLineStep = 24;
+    const int overflow = std::max(
+        0, ChatTranscriptHeight() - (kBodyBottom - kBodyTop));
+    return (overflow + kLineStep - 1) / kLineStep;
+}
+
+void DrawChatMessageClipped(uint8_t* fb, int y, const ChatMessage& msg,
+                            int clip_top, int clip_bottom)
+{
+    constexpr int kLineStep = 24;
+    constexpr int kTextHeight = 14;
+
     const int w = ChatMessageWidth(msg);
     const int x = msg.user ? (kPortraitWidth - 24 - w) : 24;
     const int h = ChatMessageHeight(msg);
-    const int max_chars = ChatMessageMaxChars(msg);
+    const int bottom = y + h;
 
-    DrawOutlineRect(fb, x, y, w, h, 2);
-    DrawWrappedText(fb, x + 12, y + 14, msg.text, 2, max_chars, 99);
+    if (bottom <= clip_top || y >= clip_bottom) return;
+
+    // Bubble outline, clipped to the chat viewport.
+    if (y >= clip_top && y + 2 <= clip_bottom) {
+        FillRect(fb, x, y, w, 2, true);
+    }
+    const int bottom_line = bottom - 2;
+    if (bottom_line >= clip_top && bottom_line + 2 <= clip_bottom) {
+        FillRect(fb, x, bottom_line, w, 2, true);
+    }
+
+    const int side_top = std::max(y, clip_top);
+    const int side_bottom = std::min(bottom, clip_bottom);
+    if (side_bottom > side_top) {
+        FillRect(fb, x, side_top, 2, side_bottom - side_top, true);
+        FillRect(fb, x + w - 2, side_top, 2, side_bottom - side_top, true);
+    }
+
+    const auto lines = WrapTextLines(msg.text, ChatMessageMaxChars(msg));
+    for (size_t i = 0; i < lines.size(); ++i) {
+        const int line_y = y + 14 + static_cast<int>(i) * kLineStep;
+        if (line_y < clip_top || line_y + kTextHeight > clip_bottom) continue;
+        DrawText(fb, x + 12, line_y, lines[i].c_str(), 2);
+    }
 }
 
 void DrawChatBody(uint8_t* fb)
 {
     constexpr int kBodyTop = 112;
     constexpr int kBodyBottom = 688;
+    constexpr int kBodyHeight = kBodyBottom - kBodyTop;
     constexpr int kGap = 10;
+    constexpr int kLineStep = 24;
 
     if (s_chat_messages.empty()) {
         DrawText(fb, 104, 300, "HOLD BOOT TO TALK", 3);
         DrawText(fb, 91, 355, "UP DOWN SCROLL CHAT", 2);
     } else {
-        const int total = static_cast<int>(s_chat_messages.size());
-        const int max_offset = std::max(0, total - 1);
-        s_chat_scroll_offset = std::clamp(s_chat_scroll_offset, 0, max_offset);
+        const int transcript_h = ChatTranscriptHeight();
+        const int overflow = std::max(0, transcript_h - kBodyHeight);
+        const int max_scroll = ChatMaxScrollLines();
+        s_chat_scroll_offset =
+            std::clamp(s_chat_scroll_offset, 0, max_scroll);
 
-        const int end = std::max(0, total - s_chat_scroll_offset);
-        int start = std::max(0, end - 1);
-        int used = 0;
+        // Offset is measured in text lines from the newest/bottom position.
+        const int scroll_px =
+            std::min(overflow, s_chat_scroll_offset * kLineStep);
+        int y = overflow > 0
+            ? kBodyTop - overflow + scroll_px
+            : kBodyTop;
 
-        while (start > 0) {
-            const int candidate_h =
-                ChatMessageHeight(s_chat_messages[static_cast<size_t>(start - 1)]);
-            const int current_h =
-                ChatMessageHeight(s_chat_messages[static_cast<size_t>(start)]);
-            const int next_used = used == 0
-                ? current_h + kGap + candidate_h
-                : used + kGap + candidate_h;
-
-            if (next_used > (kBodyBottom - kBodyTop)) break;
-            used = next_used;
-            --start;
-        }
-
-        int y = kBodyTop;
-        for (int i = start; i < end; ++i) {
-            const auto& msg = s_chat_messages[static_cast<size_t>(i)];
-            const int h = ChatMessageHeight(msg);
-
-            if (h > (kBodyBottom - kBodyTop)) {
-                DrawChatMessage(fb, y, msg);
-                break;
-            }
-
-            if (y + h > kBodyBottom) break;
-            DrawChatMessage(fb, y, msg);
-            y += h + kGap;
+        for (const auto& msg : s_chat_messages) {
+            DrawChatMessageClipped(fb, y, msg, kBodyTop, kBodyBottom);
+            y += ChatMessageHeight(msg) + kGap;
         }
     }
 
@@ -1015,10 +1045,14 @@ void HandleDirection(bool up)
     }
 
     if (s_ui_mode == UiMode::kChat) {
-        const int total = static_cast<int>(s_chat_messages.size());
-        const int max_offset = std::max(0, total - 1);
-        if (up) s_chat_scroll_offset = std::min(max_offset, s_chat_scroll_offset + 1);
-        else s_chat_scroll_offset = std::max(0, s_chat_scroll_offset - 1);
+        const int max_offset = ChatMaxScrollLines();
+        if (up) {
+            s_chat_scroll_offset =
+                std::min(max_offset, s_chat_scroll_offset + 1);
+        } else {
+            s_chat_scroll_offset =
+                std::max(0, s_chat_scroll_offset - 1);
+        }
         SaveUiState();
         RenderUi();
         RefreshUiPartial();
