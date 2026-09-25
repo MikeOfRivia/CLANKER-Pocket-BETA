@@ -182,6 +182,34 @@ void FillRect(uint8_t* fb, int x, int y, int w, int h, bool black = true)
             Pixel(fb, xx, yy, black);
 }
 
+void FillCircle(uint8_t* fb, int cx, int cy, int radius, bool black = true)
+{
+    const int r2 = radius * radius;
+    for (int y = -radius; y <= radius; ++y) {
+        for (int x = -radius; x <= radius; ++x) {
+            if (x * x + y * y <= r2) {
+                Pixel(fb, cx + x, cy + y, black);
+            }
+        }
+    }
+}
+
+void DrawCircle(uint8_t* fb, int cx, int cy, int radius, int thickness = 2,
+                bool black = true)
+{
+    const int outer2 = radius * radius;
+    const int inner = std::max(0, radius - thickness);
+    const int inner2 = inner * inner;
+    for (int y = -radius; y <= radius; ++y) {
+        for (int x = -radius; x <= radius; ++x) {
+            const int d2 = x * x + y * y;
+            if (d2 <= outer2 && d2 >= inner2) {
+                Pixel(fb, cx + x, cy + y, black);
+            }
+        }
+    }
+}
+
 void DrawText(uint8_t* fb, int x, int y, const char* text, int scale)
 {
     int cursor = x;
@@ -700,23 +728,41 @@ void DrawTopBar(uint8_t* fb)
 
 void DrawMicIcon(uint8_t* fb)
 {
-    const int x = 232;
-    const int y = 724;
-    if (s_mic_state == MicState::kRecording) {
-        FillRect(fb, x, y, 16, 24, true);
+    constexpr int cx = 240;
+    constexpr int cy = 746;
+    constexpr int radius = 30;
+    const bool recording = s_mic_state == MicState::kRecording;
+    const bool ink = !recording;
+
+    if (recording) {
+        FillCircle(fb, cx, cy, radius, true);
+    } else {
+        FillCircle(fb, cx, cy, radius, false);
+        DrawCircle(fb, cx, cy, radius, 2, true);
+    }
+
+    const int x = cx - 8;
+    const int y = cy - 17;
+
+    // Mic capsule.
+    if (recording) {
+        FillRect(fb, x, y, 16, 24, false);
+        FillRect(fb, x + 3, y + 3, 10, 18, true);
     } else {
         DrawOutlineRect(fb, x, y, 16, 24, 2);
     }
-    FillRect(fb, x - 5, y + 18, 5, 10, true);
-    FillRect(fb, x + 16, y + 18, 5, 10, true);
-    FillRect(fb, x, y + 28, 16, 2, true);
-    FillRect(fb, x + 7, y + 30, 2, 8, true);
-    FillRect(fb, x + 1, y + 38, 14, 2, true);
+
+    // Mic cradle and stem, inverted with the circle while recording.
+    FillRect(fb, x - 5, y + 18, 5, 10, ink);
+    FillRect(fb, x + 16, y + 18, 5, 10, ink);
+    FillRect(fb, x, y + 28, 16, 2, ink);
+    FillRect(fb, x + 7, y + 30, 2, 8, ink);
+    FillRect(fb, x + 1, y + 38, 14, 2, ink);
 
     if (s_mic_state == MicState::kProcessing) {
-        FillRect(fb, x + 32, y + 10, 4, 4, true);
-        FillRect(fb, x + 42, y + 10, 4, 4, true);
-        FillRect(fb, x + 52, y + 10, 4, 4, true);
+        FillRect(fb, cx + 40, cy - 2, 4, 4, true);
+        FillRect(fb, cx + 50, cy - 2, 4, 4, true);
+        FillRect(fb, cx + 60, cy - 2, 4, 4, true);
     }
 }
 
