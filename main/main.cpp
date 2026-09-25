@@ -12,6 +12,7 @@
 
 #include "axp2101.h"
 #include "beta_network.h"
+#include "beta_reader.h"
 #include "beta_clanker.h"
 #include "beta_transcription.h"
 #include "board_es8311_codec.h"
@@ -100,6 +101,7 @@ int s_chat_scroll_offset = 0;
 int s_menu_index = 0;
 bool s_reader_in_book = false;
 int s_reader_page = 0;
+int s_reader_library_index = 0;
 int s_reader_page_turns = 0;
 bool s_swap_notice = false;
 bool s_settings_open = false;
@@ -131,7 +133,11 @@ struct Glyph {
 
 constexpr Glyph kFont[] = {
     {' ', {0,0,0,0,0,0,0}}, {'-', {0,0,0,31,0,0,0}}, {':', {0,4,0,0,4,0,0}},
-    {'.', {0,0,0,0,0,12,12}},
+    {'.', {0,0,0,0,0,12,12}}, {',', {0,0,0,0,4,4,8}},
+    {'!', {4,4,4,4,4,0,4}}, {'?', {14,17,1,2,4,0,4}},
+    {'\'', {4,4,2,0,0,0,0}}, {'"', {10,10,10,0,0,0,0}},
+    {'(', {2,4,8,8,8,4,2}}, {')', {8,4,2,2,2,4,8}},
+    {'/', {1,2,4,8,16,0,0}},
     {'0', {14,17,19,21,25,17,14}}, {'1', {4,12,4,4,4,4,14}},
     {'2', {14,17,1,2,4,8,31}}, {'3', {30,1,1,14,1,1,30}},
     {'4', {2,6,10,18,31,2,2}}, {'5', {31,16,16,30,1,1,30}},
@@ -501,6 +507,27 @@ esp_err_t InitAudio()
     return ESP_OK;
 }
 
+void PlayUiTick()
+{
+    if (!s_codec || s_recording) return;
+
+    constexpr int kSamples = 160;  // 10 ms at 16 kHz.
+    std::array<int16_t, kSamples> tick = {};
+    for (int i = 0; i < kSamples; ++i) {
+        const float envelope = 1.0f - static_cast<float>(i) / kSamples;
+        const float phase = 2.0f * 3.14159265f * 1800.0f *
+                            static_cast<float>(i) / kAudioSampleRate;
+        tick[static_cast<size_t>(i)] =
+            static_cast<int16_t>(std::sin(phase) * envelope * 3500.0f);
+    }
+
+    s_codec->SetOutputVolume(18);
+    s_codec->SetOutputMuted(false);
+    s_codec->EnableOutput(true);
+    (void)s_codec->OutputData(tick.data(), tick.size());
+    s_codec->EnableOutput(false);
+}
+
 const char* ButtonName(int index)
 {
     switch (index) {
@@ -557,7 +584,7 @@ std::string DisplaySafeUpper(std::string text)
         if (std::islower(uch)) {
             ch = static_cast<char>(std::toupper(uch));
         } else if (!(std::isupper(uch) || std::isdigit(uch) || ch == ' ' ||
-                     ch == '-' || ch == ':' || ch == '.')) {
+                     std::strchr("-:.,!?\'\"()/", ch) != nullptr)) {
             ch = ' ';
         }
     }
@@ -643,6 +670,16 @@ void LoadUiState()
     const std::string last_ai = load_string("last_ai");
     if (!last_user.empty()) s_chat_messages.push_back({true, last_user});
     if (!last_ai.empty()) s_chat_messages.push_back({false, last_ai});
+
+    uint8_t reader_open = 0;
+    (void)nvs_get_u8(handle, "reader_open", &reader_open);
+    const std::string reader_book = load_string("reader_book");
+    if (!reader_book.empty() && beta_reader::Ready() &&
+        beta_reader::OpenPath(reader_book)) {
+        beta_reader::SetPage(s_reader_page);
+        s_reader_page = beta_reader::CurrentPage();
+        s_reader_in_book = reader_open != 0;
+    }
     nvs_close(handle);
 }
 
@@ -653,6 +690,9 @@ void SaveUiState()
     nvs_set_u8(handle, "mode", s_ui_mode == UiMode::kRead ? 1 : 0);
     nvs_set_i32(handle, "chat_scroll", s_chat_scroll_offset);
     nvs_set_i32(handle, "reader_page", s_reader_page);
+    nvs_set_u8(handle, "reader_open", s_reader_in_book ? 1 : 0);
+    nvs_set_str(handle, "reader_book",
+                beta_reader::HasOpenBook() ? beta_reader::CurrentPath().c_str() : "");
     nvs_set_str(handle, "response_id", s_previous_response_id.c_str());
 
     std::string last_user;
@@ -688,6 +728,7 @@ void DrawTab(uint8_t* fb, int x, const char* label, bool selected)
 void DrawBatteryIndicator(uint8_t* fb)
 {
     int level = -1;
+    const bool charging = s_pmic && s_pmic->IsCharging();
     if (s_pmic && s_pmic->isBatteryConnect()) {
         level = s_pmic->GetBatteryLevel();
     }
@@ -696,6 +737,15 @@ void DrawBatteryIndicator(uint8_t* fb)
     const int y = 31;
     const int w = 46;
     const int h = 24;
+
+    if (charging) {
+        // Compact lightning bolt immediately left of the battery.
+        FillRect(fb, 402, 31, 5, 9, true);
+        FillRect(fb, 398, 39, 9, 5, true);
+        FillRect(fb, 402, 43, 5, 10, true);
+        FillRect(fb, 407, 40, 4, 5, true);
+    }
+
     DrawOutlineRect(fb, x, y, w, h, 2);
     FillRect(fb, x + w, y + 7, 4, 10, true);
 
@@ -883,24 +933,82 @@ void DrawChatBody(uint8_t* fb)
     DrawMicIcon(fb);
 }
 
+std::string ClipDisplayText(const std::string& input, size_t max_chars)
+{
+    std::string text = DisplaySafeUpper(input);
+    if (text.size() <= max_chars) return text;
+    if (max_chars <= 3) return text.substr(0, max_chars);
+    return text.substr(0, max_chars - 3) + "...";
+}
+
 void DrawReadBody(uint8_t* fb)
 {
     if (!s_reader_in_book) {
-        DrawText(fb, 30, 125, "LIBRARY", 4);
-        DrawDivider(fb, 180);
-        DrawText(fb, 72, 300, "READER STORAGE", 3);
-        DrawText(fb, 114, 350, "NOT WIRED YET", 3);
-        DrawText(fb, 82, 445, "EPUB UI IS READY", 2);
-    } else {
-        char page[32] = {};
-        std::snprintf(page, sizeof(page), "PAGE %d", s_reader_page + 1);
-        DrawText(fb, 30, 125, "CURRENT BOOK", 3);
-        DrawText(fb, 334, 125, page, 2);
-        DrawDivider(fb, 175);
-        DrawWrappedText(fb, 35, 215,
-                        "EPUB PAGE CONTENT WILL RENDER HERE WHEN STORAGE AND PARSING ARE WIRED",
-                        2, 31, 14);
+        DrawText(fb, 24, 122, "LIBRARY", 4);
+        DrawDivider(fb, 174);
+
+        if (!beta_reader::Ready()) {
+            DrawText(fb, 80, 285, "NO SD CARD", 4);
+            DrawText(fb, 52, 350, "INSERT FAT32 TF CARD", 2);
+            DrawText(fb, 78, 395, "BOOKS GO IN /BOOKS", 2);
+            return;
+        }
+
+        const auto& books = beta_reader::Books();
+        if (books.empty()) {
+            DrawText(fb, 75, 285, "NO TXT BOOKS", 4);
+            DrawText(fb, 73, 350, "COPY BOOKS TO", 2);
+            DrawText(fb, 92, 390, "/SDCARD/BOOKS", 2);
+            return;
+        }
+
+        s_reader_library_index =
+            std::clamp(s_reader_library_index, 0, static_cast<int>(books.size()) - 1);
+        constexpr int kVisible = 8;
+        const int start_index = (s_reader_library_index / kVisible) * kVisible;
+        int y = 205;
+        for (int row = 0; row < kVisible; ++row) {
+            const int idx = start_index + row;
+            if (idx >= static_cast<int>(books.size())) break;
+            const bool selected = idx == s_reader_library_index;
+            const std::string title = ClipDisplayText(books[static_cast<size_t>(idx)].name, 30);
+            DrawText(fb, 28, y, selected ? ">" : " ", 2);
+            DrawText(fb, 52, y, title.c_str(), 2);
+            y += 55;
+        }
+
+        char count[32] = {};
+        std::snprintf(count, sizeof(count), "%d OF %d",
+                      s_reader_library_index + 1, static_cast<int>(books.size()));
+        DrawText(fb, 318, 660, count, 1);
+        return;
     }
+
+    if (!beta_reader::HasOpenBook()) {
+        s_reader_in_book = false;
+        DrawText(fb, 92, 300, "BOOK NOT FOUND", 3);
+        return;
+    }
+
+    s_reader_page = beta_reader::CurrentPage();
+    char page[40] = {};
+    std::snprintf(page, sizeof(page), "%d/%d",
+                  s_reader_page + 1, beta_reader::PageCount());
+
+    const std::string title = ClipDisplayText(beta_reader::CurrentName(), 25);
+    DrawText(fb, 24, 120, title.c_str(), 2);
+    DrawText(fb, 378, 120, page, 1);
+    DrawDivider(fb, 158);
+
+    const auto lines = beta_reader::CurrentPageLines();
+    int y = 182;
+    for (size_t i = 0; i < lines.size() && i < 21; ++i) {
+        const std::string line = DisplaySafeUpper(lines[i]);
+        DrawText(fb, 28, y, line.c_str(), 2);
+        y += 24;
+    }
+
+    DrawText(fb, 132, 684, "UP/DOWN PAGE", 1);
 }
 
 
@@ -1015,6 +1123,7 @@ void ToggleMode()
 
 void HandleDirection(bool up)
 {
+    PlayUiTick();
     if (s_settings_open) {
         if (up) s_settings_index = (s_settings_index + 2) % 3;
         else s_settings_index = (s_settings_index + 1) % 3;
@@ -1059,9 +1168,26 @@ void HandleDirection(bool up)
         return;
     }
 
-    if (!s_reader_in_book) return;
+    if (!s_reader_in_book) {
+        const int count = static_cast<int>(beta_reader::Books().size());
+        if (count <= 0) return;
+        if (up) {
+            s_reader_library_index =
+                (s_reader_library_index + count - 1) % count;
+        } else {
+            s_reader_library_index =
+                (s_reader_library_index + 1) % count;
+        }
+        RenderUi();
+        RefreshUiPartial();
+        return;
+    }
+
+    const int max_page = std::max(0, beta_reader::PageCount() - 1);
     if (up) s_reader_page = std::max(0, s_reader_page - 1);
-    else ++s_reader_page;
+    else s_reader_page = std::min(max_page, s_reader_page + 1);
+    beta_reader::SetPage(s_reader_page);
+    s_reader_page = beta_reader::CurrentPage();
     ++s_reader_page_turns;
     SaveUiState();
     RenderUi();
@@ -1074,6 +1200,7 @@ void HandleDirection(bool up)
 
 void HandleSelectShort()
 {
+    PlayUiTick();
     if (s_settings_open) {
         if (s_settings_index == 0) {
             beta_network::RunHttpsProbe();
@@ -1115,7 +1242,29 @@ void HandleSelectShort()
         return;
     }
 
-    if (!s_reader_in_book) return;
+    if (!s_reader_in_book) {
+        const auto& books = beta_reader::Books();
+        if (!books.empty()) {
+            const int idx = std::clamp(
+                s_reader_library_index, 0, static_cast<int>(books.size()) - 1);
+            const std::string selected_path = books[static_cast<size_t>(idx)].path;
+            if (!beta_reader::HasOpenBook() ||
+                beta_reader::CurrentPath() != selected_path) {
+                if (beta_reader::OpenBook(static_cast<size_t>(idx))) {
+                    s_reader_page = 0;
+                    beta_reader::SetPage(0);
+                }
+            } else {
+                s_reader_page = beta_reader::CurrentPage();
+            }
+            s_reader_in_book = beta_reader::HasOpenBook();
+            SaveUiState();
+        }
+        RenderUi();
+        (void)s_panel->RefreshFastBase();
+        return;
+    }
+
     if (s_ui_menu == UiMenu::kNone) {
         s_ui_menu = UiMenu::kReader;
         s_menu_index = 0;
@@ -1123,6 +1272,7 @@ void HandleSelectShort()
         if (s_menu_index == 0) {
             s_reader_in_book = false;
             s_ui_menu = UiMenu::kNone;
+            SaveUiState();
         } else {
             s_ui_menu = UiMenu::kNone;
         }
@@ -1341,6 +1491,12 @@ extern "C" void app_main(void)
         ESP_LOGW(kTag, "Network init returned: %s", esp_err_to_name(network_err));
     }
     beta_network::RunHttpsProbe();
+
+    const esp_err_t reader_err = beta_reader::Init();
+    if (reader_err != ESP_OK) {
+        ESP_LOGW(kTag, "Reader SD init returned: %s", esp_err_to_name(reader_err));
+    }
+
     LoadUiState();
 
     RenderUi();
