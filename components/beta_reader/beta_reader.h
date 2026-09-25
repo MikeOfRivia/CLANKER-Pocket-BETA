@@ -20,6 +20,7 @@ esp_err_t Init();
 bool Ready();
 esp_err_t LastError();
 bool RefreshLibrary();
+int ScannedFileCount();
 const std::vector<Book>& Books();
 
 bool OpenBook(size_t index);
