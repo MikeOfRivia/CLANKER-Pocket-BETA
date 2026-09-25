@@ -473,25 +473,34 @@ bool RefreshLibrary()
     s_books.clear();
     if (!s_ready) return false;
 
-    DIR* dir = opendir(kBooksDir);
-    if (!dir) return false;
+    auto scan = [](const char* folder) {
+        DIR* dir = opendir(folder);
+        if (!dir) return;
 
-    while (dirent* entry = readdir(dir)) {
-        if (!entry->d_name || entry->d_name[0] == '.') continue;
-        const std::string name(entry->d_name);
-        if (!IsSupportedBook(name)) continue;
+        while (dirent* entry = readdir(dir)) {
+            if (!entry->d_name || entry->d_name[0] == '.') continue;
+            const std::string name(entry->d_name);
+            if (!IsSupportedBook(name)) continue;
 
-        Book book;
-        book.path = std::string(kBooksDir) + "/" + name;
-        book.name = DisplayNameFromPath(name);
+            Book book;
+            book.path = std::string(folder) + "/" + name;
+            book.name = DisplayNameFromPath(name);
 
-        struct stat st = {};
-        if (stat(book.path.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
-            book.size_bytes = static_cast<uint32_t>(st.st_size);
-            s_books.push_back(book);
+            struct stat st = {};
+            if (stat(book.path.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
+                book.size_bytes = static_cast<uint32_t>(st.st_size);
+
+                const bool duplicate = std::any_of(
+                    s_books.begin(), s_books.end(),
+                    [&](const Book& existing) { return existing.path == book.path; });
+                if (!duplicate) s_books.push_back(book);
+            }
         }
-    }
-    closedir(dir);
+        closedir(dir);
+    };
+
+    scan(kMount);
+    scan(kBooksDir);
 
     std::sort(s_books.begin(), s_books.end(), [](const Book& a, const Book& b) {
         return Lower(a.name) < Lower(b.name);
