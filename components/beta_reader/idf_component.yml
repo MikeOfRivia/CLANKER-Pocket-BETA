@@ -1,0 +1,4 @@
+dependencies:
+  esp_full_miniz:
+    git: https://github.com/joltwallet/esp_full_miniz.git
+    version: master
