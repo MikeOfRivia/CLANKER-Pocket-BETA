@@ -507,9 +507,28 @@ bool RefreshLibrary()
                 const std::string path = folder + "/" + name;
 
                 struct stat st = {};
-                if (stat(path.c_str(), &st) != 0) continue;
+                const bool stat_ok = stat(path.c_str(), &st) == 0;
 
-                if (S_ISDIR(st.st_mode)) {
+                // Trust the filename extension for book discovery. Some FAT/exFAT
+                // directory entries can have incomplete metadata even though fopen()
+                // works perfectly.
+                if (IsSupportedBook(name)) {
+                    ++s_scanned_file_count;
+
+                    Book book;
+                    book.path = path;
+                    book.name = DisplayNameFromPath(name);
+                    book.size_bytes =
+                        stat_ok ? static_cast<uint32_t>(st.st_size) : 0;
+
+                    const bool duplicate = std::any_of(
+                        s_books.begin(), s_books.end(),
+                        [&](const Book& existing) { return existing.path == book.path; });
+                    if (!duplicate) s_books.push_back(book);
+                    continue;
+                }
+
+                if (stat_ok && S_ISDIR(st.st_mode)) {
                     // Skip common metadata trash; recurse through ordinary folders.
                     const std::string low = Lower(name);
                     if (low == "system volume information" ||
@@ -521,20 +540,9 @@ bool RefreshLibrary()
                     continue;
                 }
 
-                if (!S_ISREG(st.st_mode)) continue;
-                ++s_scanned_file_count;
-
-                if (!IsSupportedBook(name)) continue;
-
-                Book book;
-                book.path = path;
-                book.name = DisplayNameFromPath(name);
-                book.size_bytes = static_cast<uint32_t>(st.st_size);
-
-                const bool duplicate = std::any_of(
-                    s_books.begin(), s_books.end(),
-                    [&](const Book& existing) { return existing.path == book.path; });
-                if (!duplicate) s_books.push_back(book);
+                if (stat_ok && S_ISREG(st.st_mode)) {
+                    ++s_scanned_file_count;
+                }
             }
 
             closedir(dir);
