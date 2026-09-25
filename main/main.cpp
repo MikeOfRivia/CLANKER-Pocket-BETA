@@ -1019,6 +1019,9 @@ void DrawReadBody(uint8_t* fb)
             DrawText(fb, 75, 285, "NO BOOKS FOUND", 4);
             DrawText(fb, 73, 350, "EPUB OR TXT IN", 2);
             DrawText(fb, 92, 390, "/SDCARD OR /BOOKS", 2);
+            const std::string scanned =
+                "SCANNED FILES: " + std::to_string(beta_reader::ScannedFileCount());
+            DrawText(fb, 108, 440, scanned.c_str(), 2);
             return;
         }
 
