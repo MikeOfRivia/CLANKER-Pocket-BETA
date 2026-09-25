@@ -875,7 +875,7 @@ void DrawMenuOverlay(uint8_t* fb)
 {
     if (s_ui_menu == UiMenu::kNone) return;
     FillRect(fb, 55, 260, 370, 250, false);
-    FillRect(fb, 61, 266, 358, 238, true);
+    DrawOutlineRect(fb, 55, 260, 370, 250, 3);
 
     if (s_ui_menu == UiMenu::kChat) {
         DrawText(fb, 95, 292, "CHAT MENU", 3);
