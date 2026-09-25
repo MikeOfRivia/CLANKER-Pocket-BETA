@@ -36,6 +36,7 @@ constexpr size_t kMaxBookTextBytes = 4 * 1024 * 1024;
 
 sdmmc_card_t* s_card = nullptr;
 bool s_ready = false;
+esp_err_t s_last_error = ESP_OK;
 std::vector<Book> s_books;
 Book s_current;
 std::string s_book_text;
@@ -439,17 +440,27 @@ esp_err_t Init()
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
     host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
 
-    sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
-    slot.width = 4;
-    slot.clk = static_cast<gpio_num_t>(kSdClk);
-    slot.cmd = static_cast<gpio_num_t>(kSdCmd);
-    slot.d0 = static_cast<gpio_num_t>(kSdD0);
-    slot.d1 = static_cast<gpio_num_t>(kSdD1);
-    slot.d2 = static_cast<gpio_num_t>(kSdD2);
-    slot.d3 = static_cast<gpio_num_t>(kSdD3);
+    auto try_mount = [&](int width) -> esp_err_t {
+        sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
+        slot.width = width;
+        slot.clk = static_cast<gpio_num_t>(kSdClk);
+        slot.cmd = static_cast<gpio_num_t>(kSdCmd);
+        slot.d0 = static_cast<gpio_num_t>(kSdD0);
+        slot.d1 = static_cast<gpio_num_t>(kSdD1);
+        slot.d2 = static_cast<gpio_num_t>(kSdD2);
+        slot.d3 = static_cast<gpio_num_t>(kSdD3);
+        return esp_vfs_fat_sdmmc_mount(kMount, &host, &slot, &mount_config, &s_card);
+    };
 
-    const esp_err_t err =
-        esp_vfs_fat_sdmmc_mount(kMount, &host, &slot, &mount_config, &s_card);
+    esp_err_t err = try_mount(4);
+    if (err != ESP_OK) {
+        ESP_LOGW(kTag, "4-bit SD mount failed: %s; retrying 1-bit",
+                 esp_err_to_name(err));
+        s_card = nullptr;
+        err = try_mount(1);
+    }
+
+    s_last_error = err;
     if (err != ESP_OK) {
         ESP_LOGW(kTag, "SD mount failed: %s", esp_err_to_name(err));
         s_ready = false;
@@ -458,6 +469,7 @@ esp_err_t Init()
 
     (void)mkdir(kBooksDir, 0775);
     s_ready = true;
+    s_last_error = ESP_OK;
     ESP_LOGI(kTag, "SD mounted; book folder is %s", kBooksDir);
     RefreshLibrary();
     return ESP_OK;
@@ -466,6 +478,11 @@ esp_err_t Init()
 bool Ready()
 {
     return s_ready;
+}
+
+esp_err_t LastError()
+{
+    return s_last_error;
 }
 
 bool RefreshLibrary()
