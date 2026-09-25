@@ -956,9 +956,9 @@ void DrawReadBody(uint8_t* fb)
 
         const auto& books = beta_reader::Books();
         if (books.empty()) {
-            DrawText(fb, 75, 285, "NO TXT BOOKS", 4);
-            DrawText(fb, 73, 350, "COPY BOOKS TO", 2);
-            DrawText(fb, 92, 390, "/SDCARD/BOOKS", 2);
+            DrawText(fb, 75, 285, "NO BOOKS FOUND", 4);
+            DrawText(fb, 73, 350, "EPUB OR TXT IN", 2);
+            DrawText(fb, 92, 390, "/SDCARD OR /BOOKS", 2);
             return;
         }
 
