@@ -478,7 +478,7 @@ bool RefreshLibrary()
         if (!dir) return;
 
         while (dirent* entry = readdir(dir)) {
-            if (!entry->d_name || entry->d_name[0] == '.') continue;
+            if (entry->d_name[0] == '.') continue;
             const std::string name(entry->d_name);
             if (!IsSupportedBook(name)) continue;
 
