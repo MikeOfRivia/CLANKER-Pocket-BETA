@@ -7,11 +7,13 @@
 #include <dirent.h>
 #include <string>
 #include <sys/stat.h>
+#include <unordered_map>
 #include <vector>
 
 #include "driver/sdmmc_host.h"
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
+#include "full_miniz.h"
 #include "sdmmc_cmd.h"
 
 namespace beta_reader {
@@ -30,45 +32,356 @@ constexpr int kSdCmd = 17;
 
 constexpr int kCharsPerLine = 34;
 constexpr int kLinesPerPage = 21;
+constexpr size_t kMaxBookTextBytes = 4 * 1024 * 1024;
 
 sdmmc_card_t* s_card = nullptr;
 bool s_ready = false;
 std::vector<Book> s_books;
 Book s_current;
-std::vector<long> s_page_offsets;
+std::string s_book_text;
+std::vector<size_t> s_page_offsets;
 int s_page = 0;
 
-bool EndsWithTxt(const std::string& name)
+std::string Lower(std::string s)
 {
-    if (name.size() < 4) return false;
-    std::string ext = name.substr(name.size() - 4);
-    for (char& ch : ext) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-    return ext == ".txt";
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return s;
+}
+
+bool EndsWith(const std::string& value, const std::string& suffix)
+{
+    if (value.size() < suffix.size()) return false;
+    return Lower(value.substr(value.size() - suffix.size())) == Lower(suffix);
+}
+
+bool IsSupportedBook(const std::string& name)
+{
+    return EndsWith(name, ".txt") || EndsWith(name, ".epub");
 }
 
 std::string DisplayNameFromPath(const std::string& path)
 {
     const size_t slash = path.find_last_of('/');
     std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
-    if (EndsWithTxt(name)) name.resize(name.size() - 4);
+    if (EndsWith(name, ".txt")) name.resize(name.size() - 4);
+    else if (EndsWith(name, ".epub")) name.resize(name.size() - 5);
     return name;
 }
 
-bool BuildPageIndex(const std::string& path)
+std::string DirName(const std::string& path)
+{
+    const size_t slash = path.find_last_of('/');
+    return slash == std::string::npos ? std::string() : path.substr(0, slash + 1);
+}
+
+std::string JoinZipPath(const std::string& base, const std::string& relative)
+{
+    if (relative.empty()) return relative;
+    if (relative.front() == '/') return relative.substr(1);
+    if (base.empty()) return relative;
+    return base + relative;
+}
+
+std::string XmlAttr(const std::string& tag, const char* attr)
+{
+    const std::string needle = std::string(attr) + "=";
+    size_t p = tag.find(needle);
+    if (p == std::string::npos) return {};
+    p += needle.size();
+    while (p < tag.size() && std::isspace(static_cast<unsigned char>(tag[p]))) ++p;
+    if (p >= tag.size() || (tag[p] != '"' && tag[p] != '\'')) return {};
+    const char quote = tag[p++];
+    const size_t end = tag.find(quote, p);
+    if (end == std::string::npos) return {};
+    return tag.substr(p, end - p);
+}
+
+bool ZipExtractText(mz_zip_archive* zip, const std::string& name, std::string* out)
+{
+    if (!zip || !out) return false;
+    const int index = mz_zip_reader_locate_file(zip, name.c_str(), nullptr, 0);
+    if (index < 0) return false;
+
+    size_t size = 0;
+    void* data = mz_zip_reader_extract_to_heap(zip, static_cast<mz_uint>(index), &size, 0);
+    if (!data) return false;
+    if (size > kMaxBookTextBytes) {
+        mz_free(data);
+        return false;
+    }
+
+    out->assign(static_cast<const char*>(data), size);
+    mz_free(data);
+    return true;
+}
+
+void AppendEntityDecoded(std::string* out, const std::string& entity)
+{
+    if (entity == "amp") out->push_back('&');
+    else if (entity == "lt") out->push_back('<');
+    else if (entity == "gt") out->push_back('>');
+    else if (entity == "quot") out->push_back('"');
+    else if (entity == "apos" || entity == "#39") out->push_back('\'');
+    else if (entity == "nbsp" || entity == "#160") out->push_back(' ');
+    else out->push_back(' ');
+}
+
+std::string NormalizeUtf8Punctuation(const std::string& input)
+{
+    std::string out;
+    out.reserve(input.size());
+
+    for (size_t i = 0; i < input.size();) {
+        const unsigned char c = static_cast<unsigned char>(input[i]);
+        if (c < 0x80) {
+            out.push_back(static_cast<char>(c));
+            ++i;
+            continue;
+        }
+
+        if (i + 2 < input.size() &&
+            static_cast<unsigned char>(input[i]) == 0xE2 &&
+            static_cast<unsigned char>(input[i + 1]) == 0x80) {
+            const unsigned char t = static_cast<unsigned char>(input[i + 2]);
+            if (t == 0x98 || t == 0x99) out.push_back('\'');
+            else if (t == 0x9C || t == 0x9D) out.push_back('"');
+            else if (t == 0x93 || t == 0x94) out.push_back('-');
+            else if (t == 0xA6) out.append("...");
+            else out.push_back(' ');
+            i += 3;
+            continue;
+        }
+
+        // The current Pocket display font is ASCII. Preserve word separation for
+        // characters we cannot render yet.
+        out.push_back(' ');
+        ++i;
+        while (i < input.size() &&
+               (static_cast<unsigned char>(input[i]) & 0xC0) == 0x80) {
+            ++i;
+        }
+    }
+    return out;
+}
+
+std::string StripHtml(const std::string& html)
+{
+    std::string out;
+    out.reserve(html.size());
+
+    bool in_tag = false;
+    std::string tag;
+    for (size_t i = 0; i < html.size();) {
+        const char ch = html[i];
+
+        if (!in_tag && ch == '<') {
+            in_tag = true;
+            tag.clear();
+            ++i;
+            continue;
+        }
+
+        if (in_tag) {
+            if (ch == '>') {
+                const std::string low = Lower(tag);
+                if (low.rfind("br", 0) == 0 || low.rfind("/p", 0) == 0 ||
+                    low.rfind("/div", 0) == 0 || low.rfind("/li", 0) == 0 ||
+                    low.rfind("/h1", 0) == 0 || low.rfind("/h2", 0) == 0 ||
+                    low.rfind("/h3", 0) == 0 || low.rfind("/blockquote", 0) == 0) {
+                    if (out.empty() || out.back() != '\n') out.push_back('\n');
+                }
+                in_tag = false;
+            } else {
+                tag.push_back(ch);
+            }
+            ++i;
+            continue;
+        }
+
+        if (ch == '&') {
+            const size_t end = html.find(';', i + 1);
+            if (end != std::string::npos && end - i <= 12) {
+                AppendEntityDecoded(&out, html.substr(i + 1, end - i - 1));
+                i = end + 1;
+                continue;
+            }
+        }
+
+        if (ch == '\r') {
+            ++i;
+            continue;
+        }
+
+        out.push_back(ch);
+        ++i;
+    }
+
+    out = NormalizeUtf8Punctuation(out);
+
+    std::string clean;
+    clean.reserve(out.size());
+    bool last_space = false;
+    int blank_lines = 0;
+    for (char ch : out) {
+        if (ch == '\n') {
+            while (!clean.empty() && clean.back() == ' ') clean.pop_back();
+            if (!clean.empty() && clean.back() != '\n') {
+                clean.push_back('\n');
+                blank_lines = 1;
+            } else if (!clean.empty() && blank_lines < 2) {
+                clean.push_back('\n');
+                ++blank_lines;
+            }
+            last_space = false;
+        } else if (std::isspace(static_cast<unsigned char>(ch))) {
+            if (!last_space && !clean.empty() && clean.back() != '\n') {
+                clean.push_back(' ');
+                last_space = true;
+            }
+        } else {
+            clean.push_back(ch);
+            last_space = false;
+            blank_lines = 0;
+        }
+    }
+    return clean;
+}
+
+bool ReadTxt(const std::string& path, std::string* out)
 {
     FILE* fp = std::fopen(path.c_str(), "rb");
     if (!fp) return false;
 
+    std::fseek(fp, 0, SEEK_END);
+    const long size = std::ftell(fp);
+    std::fseek(fp, 0, SEEK_SET);
+    if (size < 0 || static_cast<size_t>(size) > kMaxBookTextBytes) {
+        std::fclose(fp);
+        return false;
+    }
+
+    out->resize(static_cast<size_t>(size));
+    const size_t got = std::fread(out->data(), 1, out->size(), fp);
+    std::fclose(fp);
+    out->resize(got);
+    *out = NormalizeUtf8Punctuation(*out);
+    return true;
+}
+
+bool ReadEpub(const std::string& path, std::string* out)
+{
+    mz_zip_archive zip = {};
+    if (!mz_zip_reader_init_file(&zip, path.c_str(), 0)) {
+        ESP_LOGW(kTag, "Unable to open EPUB zip: %s", path.c_str());
+        return false;
+    }
+
+    std::string container;
+    if (!ZipExtractText(&zip, "META-INF/container.xml", &container)) {
+        mz_zip_reader_end(&zip);
+        ESP_LOGW(kTag, "EPUB missing META-INF/container.xml");
+        return false;
+    }
+
+    std::string opf_path;
+    const size_t rootfile = container.find("<rootfile");
+    if (rootfile != std::string::npos) {
+        const size_t close = container.find('>', rootfile);
+        if (close != std::string::npos) {
+            opf_path = XmlAttr(container.substr(rootfile, close - rootfile + 1), "full-path");
+        }
+    }
+    if (opf_path.empty()) {
+        mz_zip_reader_end(&zip);
+        ESP_LOGW(kTag, "EPUB container did not identify package document");
+        return false;
+    }
+
+    std::string opf;
+    if (!ZipExtractText(&zip, opf_path, &opf)) {
+        mz_zip_reader_end(&zip);
+        ESP_LOGW(kTag, "Could not extract EPUB package: %s", opf_path.c_str());
+        return false;
+    }
+
+    const std::string base = DirName(opf_path);
+    std::unordered_map<std::string, std::string> manifest;
+
+    size_t p = 0;
+    while ((p = opf.find("<item", p)) != std::string::npos) {
+        const size_t end = opf.find('>', p);
+        if (end == std::string::npos) break;
+        const std::string tag = opf.substr(p, end - p + 1);
+        const std::string id = XmlAttr(tag, "id");
+        const std::string href = XmlAttr(tag, "href");
+        const std::string media = Lower(XmlAttr(tag, "media-type"));
+        if (!id.empty() && !href.empty() &&
+            (media.find("xhtml") != std::string::npos ||
+             EndsWith(href, ".html") || EndsWith(href, ".htm") || EndsWith(href, ".xhtml"))) {
+            manifest[id] = JoinZipPath(base, href);
+        }
+        p = end + 1;
+    }
+
+    std::vector<std::string> spine;
+    p = 0;
+    while ((p = opf.find("<itemref", p)) != std::string::npos) {
+        const size_t end = opf.find('>', p);
+        if (end == std::string::npos) break;
+        const std::string idref = XmlAttr(opf.substr(p, end - p + 1), "idref");
+        const auto it = manifest.find(idref);
+        if (it != manifest.end()) spine.push_back(it->second);
+        p = end + 1;
+    }
+
+    if (spine.empty()) {
+        // Fallback for odd but simple EPUBs: use HTML/XHTML files in archive order.
+        const mz_uint count = mz_zip_reader_get_num_files(&zip);
+        for (mz_uint i = 0; i < count; ++i) {
+            mz_zip_archive_file_stat st = {};
+            if (!mz_zip_reader_file_stat(&zip, i, &st)) continue;
+            const std::string name = st.m_filename;
+            if (EndsWith(name, ".html") || EndsWith(name, ".htm") || EndsWith(name, ".xhtml")) {
+                spine.push_back(name);
+            }
+        }
+    }
+
+    out->clear();
+    out->reserve(256 * 1024);
+    for (const std::string& chapter_path : spine) {
+        std::string chapter;
+        if (!ZipExtractText(&zip, chapter_path, &chapter)) continue;
+        chapter = StripHtml(chapter);
+        if (chapter.empty()) continue;
+
+        if (!out->empty() && out->back() != '\n') out->push_back('\n');
+        out->append(chapter);
+        out->append("\n\n");
+
+        if (out->size() > kMaxBookTextBytes) {
+            out->resize(kMaxBookTextBytes);
+            break;
+        }
+    }
+
+    mz_zip_reader_end(&zip);
+    return !out->empty();
+}
+
+void BuildPageIndex()
+{
     s_page_offsets.clear();
     s_page_offsets.push_back(0);
 
     int col = 0;
     int line = 0;
-    int c = 0;
-    while ((c = std::fgetc(fp)) != EOF) {
-        if (c == '\r') continue;
-
-        if (c == '\n') {
+    for (size_t i = 0; i < s_book_text.size(); ++i) {
+        const char ch = s_book_text[i];
+        if (ch == '\r') continue;
+        if (ch == '\n') {
             ++line;
             col = 0;
         } else {
@@ -79,72 +392,36 @@ bool BuildPageIndex(const std::string& path)
             }
         }
 
-        if (line >= kLinesPerPage) {
-            const long next = std::ftell(fp);
-            const int probe = std::fgetc(fp);
-            if (probe != EOF) {
-                s_page_offsets.push_back(next);
-                std::fseek(fp, next, SEEK_SET);
-            }
+        if (line >= kLinesPerPage && i + 1 < s_book_text.size()) {
+            s_page_offsets.push_back(i + 1);
             line = 0;
             col = 0;
         }
     }
-
-    std::fclose(fp);
-    if (s_page_offsets.empty()) s_page_offsets.push_back(0);
-    return true;
 }
 
-std::vector<std::string> ReadPage(long start, long end)
+std::vector<std::string> PageLines(size_t start, size_t end)
 {
     std::vector<std::string> lines;
-    FILE* fp = std::fopen(s_current.path.c_str(), "rb");
-    if (!fp) return lines;
-
-    std::fseek(fp, start, SEEK_SET);
     std::string line;
-    int col = 0;
+    line.reserve(kCharsPerLine);
 
-    while (static_cast<int>(lines.size()) < kLinesPerPage) {
-        const long pos = std::ftell(fp);
-        if (end >= 0 && pos >= end) break;
-
-        const int c = std::fgetc(fp);
-        if (c == EOF) break;
-        if (c == '\r') continue;
-
-        if (c == '\n') {
+    for (size_t i = start; i < end && lines.size() < kLinesPerPage; ++i) {
+        const char ch = s_book_text[i];
+        if (ch == '\r') continue;
+        if (ch == '\n') {
             lines.push_back(line);
             line.clear();
-            col = 0;
             continue;
         }
-
-        char out = ' ';
-        if (c == '\t') {
-            out = ' ';
-        } else if (c >= 32 && c <= 126) {
-            out = static_cast<char>(c);
-        } else {
-            // Current Pocket font is ASCII-only. Preserve spacing rather than render garbage.
-            out = ' ';
-        }
-
-        line.push_back(out);
-        ++col;
-        if (col >= kCharsPerLine) {
+        line.push_back(ch);
+        if (static_cast<int>(line.size()) >= kCharsPerLine) {
             lines.push_back(line);
             line.clear();
-            col = 0;
         }
     }
 
-    if (!line.empty() && static_cast<int>(lines.size()) < kLinesPerPage) {
-        lines.push_back(line);
-    }
-
-    std::fclose(fp);
+    if (!line.empty() && lines.size() < kLinesPerPage) lines.push_back(line);
     return lines;
 }
 
@@ -202,7 +479,7 @@ bool RefreshLibrary()
     while (dirent* entry = readdir(dir)) {
         if (!entry->d_name || entry->d_name[0] == '.') continue;
         const std::string name(entry->d_name);
-        if (!EndsWithTxt(name)) continue;
+        if (!IsSupportedBook(name)) continue;
 
         Book book;
         book.path = std::string(kBooksDir) + "/" + name;
@@ -217,16 +494,10 @@ bool RefreshLibrary()
     closedir(dir);
 
     std::sort(s_books.begin(), s_books.end(), [](const Book& a, const Book& b) {
-        std::string aa = a.name;
-        std::string bb = b.name;
-        std::transform(aa.begin(), aa.end(), aa.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        std::transform(bb.begin(), bb.end(), bb.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        return aa < bb;
+        return Lower(a.name) < Lower(b.name);
     });
 
-    ESP_LOGI(kTag, "Library contains %u TXT books",
+    ESP_LOGI(kTag, "Library contains %u books",
              static_cast<unsigned>(s_books.size()));
     return true;
 }
@@ -249,29 +520,33 @@ bool OpenPath(const std::string& path)
     struct stat st = {};
     if (stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) return false;
 
+    std::string text;
+    const bool epub = EndsWith(path, ".epub");
+    const bool ok = epub ? ReadEpub(path, &text) : ReadTxt(path, &text);
+    if (!ok || text.empty()) return false;
+
     Book book;
     book.path = path;
     book.name = DisplayNameFromPath(path);
     book.size_bytes = static_cast<uint32_t>(st.st_size);
 
     s_current = book;
+    s_book_text = std::move(text);
     s_page = 0;
-    if (!BuildPageIndex(path)) {
-        s_current = {};
-        s_page_offsets.clear();
-        return false;
-    }
+    BuildPageIndex();
 
-    ESP_LOGI(kTag, "Opened %s: %u bytes, %u pages",
+    ESP_LOGI(kTag, "Opened %s: %u source bytes, %u text bytes, %u pages",
              s_current.name.c_str(),
              static_cast<unsigned>(s_current.size_bytes),
+             static_cast<unsigned>(s_book_text.size()),
              static_cast<unsigned>(s_page_offsets.size()));
-    return true;
+    return !s_page_offsets.empty();
 }
 
 void CloseBook()
 {
     s_current = {};
+    s_book_text.clear();
     s_page_offsets.clear();
     s_page = 0;
 }
@@ -314,12 +589,12 @@ std::vector<std::string> CurrentPageLines()
 {
     if (!HasOpenBook()) return {};
 
-    const long start = s_page_offsets[static_cast<size_t>(s_page)];
-    const long end =
+    const size_t start = s_page_offsets[static_cast<size_t>(s_page)];
+    const size_t end =
         (s_page + 1 < static_cast<int>(s_page_offsets.size()))
             ? s_page_offsets[static_cast<size_t>(s_page + 1)]
-            : -1;
-    return ReadPage(start, end);
+            : s_book_text.size();
+    return PageLines(start, end);
 }
 
 }  // namespace beta_reader
