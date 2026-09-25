@@ -113,6 +113,8 @@ constexpr int64_t kModeSwapCommitUs = 3000000;
 constexpr int64_t kSettingsNoticeUs = 1500000;
 constexpr int64_t kSettingsCommitUs = 3000000;
 constexpr int64_t kBootPttGraceUs = 250000;
+constexpr int64_t kDirectionRepeatDelayUs = 500000;
+constexpr int64_t kDirectionRepeatIntervalUs = 220000;
 constexpr int kReaderFullRefreshEveryPages = 10;
 constexpr int kChatVisibleMessages = 4;
 
@@ -507,25 +509,70 @@ esp_err_t InitAudio()
     return ESP_OK;
 }
 
-void PlayUiTick()
+void PlayTone(float frequency_hz, int duration_ms, int volume = 32,
+              int amplitude = 9000, bool keep_output_enabled = false)
 {
-    if (!s_codec || s_recording) return;
+    if (!s_codec || s_recording || duration_ms <= 0) return;
 
-    constexpr int kSamples = 560;  // 35 ms at 16 kHz.
-    std::array<int16_t, kSamples> tick = {};
-    for (int i = 0; i < kSamples; ++i) {
-        const float envelope = 1.0f - static_cast<float>(i) / kSamples;
-        const float phase = 2.0f * 3.14159265f * 1400.0f *
-                            static_cast<float>(i) / kAudioSampleRate;
-        tick[static_cast<size_t>(i)] =
-            static_cast<int16_t>(std::sin(phase) * envelope * 7000.0f);
+    const int samples = std::max(1, (kAudioSampleRate * duration_ms) / 1000);
+    std::vector<int16_t> tone(static_cast<size_t>(samples), 0);
+    for (int i = 0; i < samples; ++i) {
+        const float t = static_cast<float>(i) / kAudioSampleRate;
+        const float fade_in = std::min(1.0f, static_cast<float>(i) / 64.0f);
+        const float fade_out =
+            std::min(1.0f, static_cast<float>(samples - i - 1) / 96.0f);
+        const float envelope = std::min(fade_in, fade_out);
+        tone[static_cast<size_t>(i)] =
+            static_cast<int16_t>(std::sin(2.0f * 3.14159265f * frequency_hz * t) *
+                                 envelope * amplitude);
     }
 
-    s_codec->SetOutputVolume(28);
+    s_codec->SetOutputVolume(volume);
+    s_codec->SetOutputMuted(false);
+    const bool already_enabled = s_codec->output_enabled();
+    if (!already_enabled) {
+        s_codec->EnableOutput(true);
+        // The board's speaker amp needs a moment after PA enable.
+        vTaskDelay(pdMS_TO_TICKS(80));
+    }
+
+    (void)s_codec->OutputData(tone.data(), tone.size());
+    vTaskDelay(pdMS_TO_TICKS(duration_ms + 35));
+
+    if (!keep_output_enabled && !already_enabled) {
+        s_codec->SetOutputMuted(true);
+        vTaskDelay(pdMS_TO_TICKS(20));
+        s_codec->EnableOutput(false);
+    }
+}
+
+void PlayUiTick()
+{
+    PlayTone(1250.0f, 32, 36, 10000);
+}
+
+void PlayBootTune()
+{
+    if (!s_codec) return;
+
+    s_codec->SetOutputVolume(38);
     s_codec->SetOutputMuted(false);
     s_codec->EnableOutput(true);
-    (void)s_codec->OutputData(tick.data(), tick.size());
-    vTaskDelay(pdMS_TO_TICKS(45));
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    // Intentionally cheap little CLANKER startup chirp.
+    PlayTone(523.25f, 90, 38, 10500, true);
+    vTaskDelay(pdMS_TO_TICKS(25));
+    PlayTone(659.25f, 90, 38, 10500, true);
+    vTaskDelay(pdMS_TO_TICKS(25));
+    PlayTone(783.99f, 115, 38, 11000, true);
+    vTaskDelay(pdMS_TO_TICKS(35));
+    PlayTone(392.00f, 70, 34, 9000, true);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    PlayTone(1046.50f, 150, 40, 11500, true);
+
+    s_codec->SetOutputMuted(true);
+    vTaskDelay(pdMS_TO_TICKS(35));
     s_codec->EnableOutput(false);
 }
 
@@ -1491,6 +1538,7 @@ extern "C" void app_main(void)
         ESP_LOGE(kTag, "Audio init failed");
         return;
     }
+    PlayBootTune();
 
     const esp_err_t network_err = beta_network::Init();
     if (network_err != ESP_OK) {
@@ -1515,6 +1563,10 @@ extern "C" void app_main(void)
     int64_t select_down_us = 0;
     int64_t boot_down_us = 0;
     int64_t settings_combo_started_us = 0;
+    int64_t up_down_us = 0;
+    int64_t down_down_us = 0;
+    int64_t up_last_repeat_us = 0;
+    int64_t down_last_repeat_us = 0;
     bool select_consumed = false;
     bool boot_consumed = false;
     bool settings_combo_consumed = false;
@@ -1637,11 +1689,37 @@ extern "C" void app_main(void)
             last[2] = select_now;
 
             const int up_now = gpio_get_level(kButtonUp);
-            if (last[1] == 1 && up_now == 0) HandleDirection(true);
+            const int64_t now_us = esp_timer_get_time();
+            if (last[1] == 1 && up_now == 0) {
+                up_down_us = now_us;
+                up_last_repeat_us = now_us;
+                HandleDirection(true);
+            } else if (up_now == 0 && up_down_us != 0 &&
+                       now_us - up_down_us >= kDirectionRepeatDelayUs &&
+                       now_us - up_last_repeat_us >= kDirectionRepeatIntervalUs) {
+                up_last_repeat_us = now_us;
+                HandleDirection(true);
+            } else if (last[1] == 0 && up_now == 1) {
+                up_down_us = 0;
+                up_last_repeat_us = 0;
+            }
             last[1] = up_now;
 
             const int down_now = gpio_get_level(kButtonDown);
-            if (last[3] == 1 && down_now == 0) HandleDirection(false);
+            const int64_t now_down_us = esp_timer_get_time();
+            if (last[3] == 1 && down_now == 0) {
+                down_down_us = now_down_us;
+                down_last_repeat_us = now_down_us;
+                HandleDirection(false);
+            } else if (down_now == 0 && down_down_us != 0 &&
+                       now_down_us - down_down_us >= kDirectionRepeatDelayUs &&
+                       now_down_us - down_last_repeat_us >= kDirectionRepeatIntervalUs) {
+                down_last_repeat_us = now_down_us;
+                HandleDirection(false);
+            } else if (last[3] == 0 && down_now == 1) {
+                down_down_us = 0;
+                down_last_repeat_us = 0;
+            }
             last[3] = down_now;
 
             vTaskDelay(pdMS_TO_TICKS(10));
