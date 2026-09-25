@@ -28,3 +28,8 @@ CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 
 # Reader SD cards may be FAT32 or exFAT.
 CONFIG_FATFS_EXFAT=y
+
+# Reader needs long filenames for .epub and ordinary book names.
+# CONFIG_FATFS_LFN_NONE is not set
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255
