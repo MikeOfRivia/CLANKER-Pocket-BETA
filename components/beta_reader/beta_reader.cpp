@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
+#include <functional>
 #include <string>
 #include <sys/stat.h>
 #include <unordered_map>
@@ -38,6 +39,7 @@ sdmmc_card_t* s_card = nullptr;
 bool s_ready = false;
 esp_err_t s_last_error = ESP_OK;
 std::vector<Book> s_books;
+int s_scanned_file_count = 0;
 Book s_current;
 std::string s_book_text;
 std::vector<size_t> s_page_offsets;
@@ -488,23 +490,45 @@ esp_err_t LastError()
 bool RefreshLibrary()
 {
     s_books.clear();
+    s_scanned_file_count = 0;
     if (!s_ready) return false;
 
-    auto scan = [](const char* folder) {
-        DIR* dir = opendir(folder);
-        if (!dir) return;
+    std::function<void(const std::string&, int)> scan =
+        [&](const std::string& folder, int depth) {
+            if (depth > 6) return;
 
-        while (dirent* entry = readdir(dir)) {
-            if (entry->d_name[0] == '.') continue;
-            const std::string name(entry->d_name);
-            if (!IsSupportedBook(name)) continue;
+            DIR* dir = opendir(folder.c_str());
+            if (!dir) return;
 
-            Book book;
-            book.path = std::string(folder) + "/" + name;
-            book.name = DisplayNameFromPath(name);
+            while (dirent* entry = readdir(dir)) {
+                if (entry->d_name[0] == '.') continue;
 
-            struct stat st = {};
-            if (stat(book.path.c_str(), &st) == 0 && S_ISREG(st.st_mode)) {
+                const std::string name(entry->d_name);
+                const std::string path = folder + "/" + name;
+
+                struct stat st = {};
+                if (stat(path.c_str(), &st) != 0) continue;
+
+                if (S_ISDIR(st.st_mode)) {
+                    // Skip common metadata trash; recurse through ordinary folders.
+                    const std::string low = Lower(name);
+                    if (low == "system volume information" ||
+                        low == "$recycle.bin" ||
+                        low == "lost.dir") {
+                        continue;
+                    }
+                    scan(path, depth + 1);
+                    continue;
+                }
+
+                if (!S_ISREG(st.st_mode)) continue;
+                ++s_scanned_file_count;
+
+                if (!IsSupportedBook(name)) continue;
+
+                Book book;
+                book.path = path;
+                book.name = DisplayNameFromPath(name);
                 book.size_bytes = static_cast<uint32_t>(st.st_size);
 
                 const bool duplicate = std::any_of(
@@ -512,20 +536,24 @@ bool RefreshLibrary()
                     [&](const Book& existing) { return existing.path == book.path; });
                 if (!duplicate) s_books.push_back(book);
             }
-        }
-        closedir(dir);
-    };
 
-    scan(kMount);
-    scan(kBooksDir);
+            closedir(dir);
+        };
+
+    scan(kMount, 0);
 
     std::sort(s_books.begin(), s_books.end(), [](const Book& a, const Book& b) {
         return Lower(a.name) < Lower(b.name);
     });
 
-    ESP_LOGI(kTag, "Library contains %u books",
-             static_cast<unsigned>(s_books.size()));
+    ESP_LOGI(kTag, "Scanned %d files; library contains %u books",
+             s_scanned_file_count, static_cast<unsigned>(s_books.size()));
     return true;
+}
+
+int ScannedFileCount()
+{
+    return s_scanned_file_count;
 }
 
 const std::vector<Book>& Books()
