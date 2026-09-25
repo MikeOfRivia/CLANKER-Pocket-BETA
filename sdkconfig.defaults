@@ -25,3 +25,6 @@ CONFIG_CODEC_I2C_BACKWARD_COMPATIBLE=n
 
 # TLS trust store for HTTPS bring-up probe.
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+
+# Reader SD cards may be FAT32 or exFAT.
+CONFIG_FATFS_EXFAT=y
