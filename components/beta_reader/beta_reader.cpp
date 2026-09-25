@@ -521,9 +521,12 @@ bool RefreshLibrary()
                     book.size_bytes =
                         stat_ok ? static_cast<uint32_t>(st.st_size) : 0;
 
+                    const std::string normalized_path = Lower(book.path);
                     const bool duplicate = std::any_of(
                         s_books.begin(), s_books.end(),
-                        [&](const Book& existing) { return existing.path == book.path; });
+                        [&](const Book& existing) {
+                            return Lower(existing.path) == normalized_path;
+                        });
                     if (!duplicate) s_books.push_back(book);
                     continue;
                 }
