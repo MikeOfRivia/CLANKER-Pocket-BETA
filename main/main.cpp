@@ -511,20 +511,21 @@ void PlayUiTick()
 {
     if (!s_codec || s_recording) return;
 
-    constexpr int kSamples = 160;  // 10 ms at 16 kHz.
+    constexpr int kSamples = 560;  // 35 ms at 16 kHz.
     std::array<int16_t, kSamples> tick = {};
     for (int i = 0; i < kSamples; ++i) {
         const float envelope = 1.0f - static_cast<float>(i) / kSamples;
-        const float phase = 2.0f * 3.14159265f * 1800.0f *
+        const float phase = 2.0f * 3.14159265f * 1400.0f *
                             static_cast<float>(i) / kAudioSampleRate;
         tick[static_cast<size_t>(i)] =
-            static_cast<int16_t>(std::sin(phase) * envelope * 3500.0f);
+            static_cast<int16_t>(std::sin(phase) * envelope * 7000.0f);
     }
 
-    s_codec->SetOutputVolume(18);
+    s_codec->SetOutputVolume(28);
     s_codec->SetOutputMuted(false);
     s_codec->EnableOutput(true);
     (void)s_codec->OutputData(tick.data(), tick.size());
+    vTaskDelay(pdMS_TO_TICKS(45));
     s_codec->EnableOutput(false);
 }
 
@@ -948,9 +949,14 @@ void DrawReadBody(uint8_t* fb)
         DrawDivider(fb, 174);
 
         if (!beta_reader::Ready()) {
-            DrawText(fb, 80, 285, "NO SD CARD", 4);
-            DrawText(fb, 52, 350, "INSERT FAT32 TF CARD", 2);
-            DrawText(fb, 78, 395, "BOOKS GO IN /BOOKS", 2);
+            DrawText(fb, 80, 265, "SD NOT READY", 4);
+            char err[48] = {};
+            std::snprintf(err, sizeof(err), "ERROR: %s",
+                          esp_err_to_name(beta_reader::LastError()));
+            DrawText(fb, 54, 335, err, 2);
+            DrawText(fb, 55, 385, "FAT32 OR EXFAT CARD", 2);
+            DrawText(fb, 64, 425, "EPUB/TXT IN ROOT OR", 2);
+            DrawText(fb, 100, 460, "/BOOKS", 2);
             return;
         }
 
