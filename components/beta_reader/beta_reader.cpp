@@ -549,6 +549,9 @@ bool RefreshLibrary()
         };
 
     scan(kMount, 0);
+    // Always scan the known reader folder directly. Do not depend on FAT/exFAT
+    // stat() metadata from the root directory to discover a folder we create.
+    scan(kBooksDir, 0);
 
     std::sort(s_books.begin(), s_books.end(), [](const Book& a, const Book& b) {
         return Lower(a.name) < Lower(b.name);
