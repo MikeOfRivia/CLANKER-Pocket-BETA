@@ -18,6 +18,7 @@ struct Book {
 
 esp_err_t Init();
 bool Ready();
+esp_err_t LastError();
 bool RefreshLibrary();
 const std::vector<Book>& Books();
 
