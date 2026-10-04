@@ -1,5 +1,6 @@
 #include "board_es8311_codec.h"
 
+#include <array>
 #include <cassert>
 #include <esp_log.h>
 #include <soc/soc_caps.h>
@@ -66,11 +67,6 @@ Es8311Codec::Es8311Codec(void* i2c_master_handle, i2c_port_t i2c_port,
 
 Es8311Codec::~Es8311Codec() {
     Shutdown();
-    if (dev_ != nullptr) {
-        esp_codec_dev_delete(dev_);
-        dev_ = nullptr;
-    }
-
     if (tx_handle_ != nullptr) {
         i2s_del_channel(tx_handle_);
         tx_handle_ = nullptr;
@@ -122,29 +118,60 @@ void Es8311Codec::UpdatePaState() {
     gpio_set_level(pa_pin_, pa_inverted_ ? !level : level);
 }
 
-void Es8311Codec::UpdateDeviceState() {
-    if ((input_enabled_ || output_enabled_) && dev_ == nullptr) {
-        SetChannelsEnabled(true);
-        esp_codec_dev_cfg_t dev_cfg = {
-            .dev_type = ESP_CODEC_DEV_TYPE_IN_OUT,
-            .codec_if = codec_if_,
-            .data_if = data_if_,
-        };
-        dev_ = esp_codec_dev_new(&dev_cfg);
-        assert(dev_ != NULL);
+void Es8311Codec::EnsurePlaybackDevice() {
+    if (playback_dev_ != nullptr || codec_if_ == nullptr || data_if_ == nullptr) return;
 
-        esp_codec_dev_sample_info_t fs = {
-            .bits_per_sample = 16,
-            .channel = 1,
-            .channel_mask = 0,
-            .sample_rate = (uint32_t)input_sample_rate_,
-            .mclk_multiple = 0,
-        };
-        ESP_ERROR_CHECK(esp_codec_dev_open(dev_, &fs));
-        ESP_ERROR_CHECK(esp_codec_dev_set_in_gain(dev_, input_gain_));
-        ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(dev_, output_volume_));
-        ESP_ERROR_CHECK(esp_codec_dev_set_out_mute(dev_, output_muted_));
-    }
+    SetChannelsEnabled(true);
+    esp_codec_dev_cfg_t dev_cfg = {
+        .dev_type = ESP_CODEC_DEV_TYPE_OUT,
+        .codec_if = codec_if_,
+        .data_if = data_if_,
+    };
+    playback_dev_ = esp_codec_dev_new(&dev_cfg);
+    assert(playback_dev_ != nullptr);
+
+    // Waveshare's reference playback path for this board is stereo. Keeping
+    // playback and record devices separate lets the microphone remain mono.
+    esp_codec_dev_sample_info_t fs = {
+        .bits_per_sample = 16,
+        .channel = 2,
+        .channel_mask = 0,
+        .sample_rate = static_cast<uint32_t>(output_sample_rate_),
+        .mclk_multiple = 0,
+    };
+    ESP_ERROR_CHECK(esp_codec_dev_open(playback_dev_, &fs));
+    ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(playback_dev_, output_volume_));
+    ESP_ERROR_CHECK(esp_codec_dev_set_out_mute(playback_dev_, output_muted_));
+    ESP_LOGI(TAG, "Playback device opened stereo at %d Hz", output_sample_rate_);
+}
+
+void Es8311Codec::EnsureRecordDevice() {
+    if (record_dev_ != nullptr || codec_if_ == nullptr || data_if_ == nullptr) return;
+
+    SetChannelsEnabled(true);
+    esp_codec_dev_cfg_t dev_cfg = {
+        .dev_type = ESP_CODEC_DEV_TYPE_IN,
+        .codec_if = codec_if_,
+        .data_if = data_if_,
+    };
+    record_dev_ = esp_codec_dev_new(&dev_cfg);
+    assert(record_dev_ != nullptr);
+
+    esp_codec_dev_sample_info_t fs = {
+        .bits_per_sample = 16,
+        .channel = 1,
+        .channel_mask = 0,
+        .sample_rate = static_cast<uint32_t>(input_sample_rate_),
+        .mclk_multiple = 0,
+    };
+    ESP_ERROR_CHECK(esp_codec_dev_open(record_dev_, &fs));
+    ESP_ERROR_CHECK(esp_codec_dev_set_in_gain(record_dev_, input_gain_));
+    ESP_LOGI(TAG, "Record device opened mono at %d Hz", input_sample_rate_);
+}
+
+void Es8311Codec::UpdateDeviceState() {
+    if (output_enabled_) EnsurePlaybackDevice();
+    if (input_enabled_) EnsureRecordDevice();
     UpdatePaState();
 }
 
@@ -183,8 +210,8 @@ void Es8311Codec::CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gpio_nu
         .slot_cfg = {
             .data_bit_width = I2S_DATA_BIT_WIDTH_16BIT,
             .slot_bit_width = I2S_SLOT_BIT_WIDTH_16BIT,
-            .slot_mode = I2S_SLOT_MODE_MONO,
-            .slot_mask = I2S_STD_SLOT_LEFT,
+            .slot_mode = I2S_SLOT_MODE_STEREO,
+            .slot_mask = I2S_STD_SLOT_BOTH,
             .ws_width = I2S_DATA_BIT_WIDTH_16BIT,
             .ws_pol = false,
             .bit_shift = true,
@@ -219,24 +246,24 @@ void Es8311Codec::CreateDuplexChannels(gpio_num_t mclk, gpio_num_t bclk, gpio_nu
 void Es8311Codec::SetInputGain(float gain) {
     std::lock_guard<std::mutex> lock(data_if_mutex_);
     AudioCodec::SetInputGain(gain);
-    if (dev_ != nullptr) {
-        ESP_ERROR_CHECK(esp_codec_dev_set_in_gain(dev_, input_gain_));
+    if (record_dev_ != nullptr) {
+        ESP_ERROR_CHECK(esp_codec_dev_set_in_gain(record_dev_, input_gain_));
     }
 }
 
 void Es8311Codec::SetOutputVolume(int volume) {
     std::lock_guard<std::mutex> lock(data_if_mutex_);
     AudioCodec::SetOutputVolume(volume);
-    if (dev_ != nullptr) {
-        ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(dev_, output_volume_));
+    if (playback_dev_ != nullptr) {
+        ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(playback_dev_, output_volume_));
     }
 }
 
 void Es8311Codec::SetOutputMuted(bool muted) {
     std::lock_guard<std::mutex> lock(data_if_mutex_);
     AudioCodec::SetOutputMuted(muted);
-    if (dev_ != nullptr) {
-        ESP_ERROR_CHECK(esp_codec_dev_set_out_mute(dev_, output_muted_));
+    if (playback_dev_ != nullptr) {
+        ESP_ERROR_CHECK(esp_codec_dev_set_out_mute(playback_dev_, output_muted_));
     }
 }
 
@@ -268,15 +295,12 @@ int Es8311Codec::Read(int16_t* dest, int samples) {
     esp_codec_dev_handle_t dev = nullptr;
     {
         std::lock_guard<std::mutex> lock(data_if_mutex_);
-        if (!input_enabled_ || dev_ == nullptr) {
-            return 0;
-        }
-        dev = dev_;
+        if (!input_enabled_ || record_dev_ == nullptr) return 0;
+        dev = record_dev_;
     }
-    if (dev == nullptr) {
-        return 0;
-    }
-    int ret = esp_codec_dev_read(dev, (void*)dest, samples * sizeof(int16_t));
+
+    const int ret =
+        esp_codec_dev_read(dev, static_cast<void*>(dest), samples * sizeof(int16_t));
     if (ret != ESP_CODEC_DEV_OK) {
         ESP_LOGW(TAG, "Audio read failed: %d", ret);
         return 0;
@@ -288,40 +312,62 @@ int Es8311Codec::Write(const int16_t* data, int samples) {
     esp_codec_dev_handle_t dev = nullptr;
     {
         std::lock_guard<std::mutex> lock(data_if_mutex_);
-        if (!output_enabled_ || dev_ == nullptr) {
+        if (!output_enabled_ || playback_dev_ == nullptr || data == nullptr ||
+            samples <= 0) {
             return 0;
         }
-        dev = dev_;
+        dev = playback_dev_;
     }
-    if (dev == nullptr) {
-        return 0;
+
+    // The application generates mono PCM, while this board's proven playback
+    // path is stereo. Duplicate each frame into L/R and feed the codec in small
+    // DMA-friendly chunks instead of one giant write.
+    constexpr int kMonoFramesPerChunk = 64;  // 256 stereo bytes at 16-bit.
+    std::array<int16_t, kMonoFramesPerChunk * 2> stereo = {};
+
+    int consumed = 0;
+    while (consumed < samples) {
+        const int frames = std::min(kMonoFramesPerChunk, samples - consumed);
+        for (int i = 0; i < frames; ++i) {
+            const int16_t sample = data[consumed + i];
+            stereo[static_cast<size_t>(i) * 2] = sample;
+            stereo[static_cast<size_t>(i) * 2 + 1] = sample;
+        }
+
+        const int bytes = frames * 2 * static_cast<int>(sizeof(int16_t));
+        const int ret = esp_codec_dev_write(dev, stereo.data(), bytes);
+        if (ret != ESP_CODEC_DEV_OK) {
+            ESP_LOGW(TAG, "Audio write failed after %d/%d samples: %d",
+                     consumed, samples, ret);
+            return consumed;
+        }
+        consumed += frames;
     }
-    int ret = esp_codec_dev_write(dev, (void*)data, samples * sizeof(int16_t));
-    if (ret != ESP_CODEC_DEV_OK) {
-        ESP_LOGW(TAG, "Audio write failed: %d", ret);
-        return 0;
-    }
-    return samples;
+    return consumed;
 }
 
 void Es8311Codec::Shutdown() {
     std::lock_guard<std::mutex> lock(data_if_mutex_);
-    const bool codec_device_was_open = dev_ != nullptr;
-    if (dev_ != nullptr) {
-        ESP_ERROR_CHECK(esp_codec_dev_set_out_mute(dev_, true));
-        ESP_ERROR_CHECK(esp_codec_dev_set_out_vol(dev_, 0));
-        esp_codec_dev_close(dev_);
-        esp_codec_dev_delete(dev_);
-        dev_ = nullptr;
+
+    if (playback_dev_ != nullptr) {
+        (void)esp_codec_dev_set_out_mute(playback_dev_, true);
+        (void)esp_codec_dev_set_out_vol(playback_dev_, 0);
+        esp_codec_dev_close(playback_dev_);
+        esp_codec_dev_delete(playback_dev_);
+        playback_dev_ = nullptr;
     }
+
+    if (record_dev_ != nullptr) {
+        esp_codec_dev_close(record_dev_);
+        esp_codec_dev_delete(record_dev_);
+        record_dev_ = nullptr;
+    }
+
     output_muted_ = true;
     output_enabled_ = false;
     input_enabled_ = false;
     UpdatePaState();
-    if (codec_device_was_open) {
-        channels_enabled_ = false;
-    } else if (channels_enabled_) {
-        SetChannelsEnabled(false);
-    }
+
+    if (channels_enabled_) SetChannelsEnabled(false);
     ESP_LOGI(TAG, "ES8311 audio shutdown complete");
 }
