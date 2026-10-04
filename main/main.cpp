@@ -107,6 +107,7 @@ int s_reader_page_turns = 0;
 bool s_settings_open = false;
 bool s_settings_notice = false;
 int s_settings_index = 0;
+int64_t s_ui_audio_idle_deadline_us = 0;
 
 constexpr int64_t kSettingsNoticeUs = 1500000;
 constexpr int64_t kSettingsCommitUs = 3000000;
@@ -115,6 +116,7 @@ constexpr int64_t kDirectionRepeatDelayUs = 500000;
 constexpr int64_t kDirectionRepeatIntervalUs = 220000;
 constexpr int64_t kChatScrollRepeatDelayUs = 220000;
 constexpr int64_t kChatScrollRepeatIntervalUs = 60000;
+constexpr int64_t kUiAudioIdleTimeoutUs = 2000000;
 constexpr int kChatScrollTapStepPx = 28;
 constexpr int kChatScrollHoldStepPx = 116;
 constexpr int kReaderFullRefreshEveryPages = 10;
@@ -599,9 +601,9 @@ void PlayTone(float frequency_hz, int duration_ms, int volume = 32,
 
 void PlayUiTick()
 {
-    // Keep the playback path warm between UI interactions. Cold-starting the
-    // PA/codec takes roughly the same 160+ ms ramp used by the proven boot
-    // tune; once warm, a button chirp can begin almost immediately.
+    // Cold-start with the proven boot-tune ramp, then keep the playback path
+    // warm only for a short idle window so rapid UI navigation stays responsive
+    // without paying a continuous battery penalty.
     constexpr int kDurationMs = 70;
     constexpr int kVolume = 76;
     constexpr int kAmplitude = 20000;
@@ -655,9 +657,26 @@ void PlayUiTick()
 
     (void)s_codec->OutputData(tone.data(), tone.size());
 
-    // Mute between interactions, but deliberately leave playback/PA enabled.
+    // Stay powered but muted briefly so successive menu/button interactions
+    // chirp immediately. The main loop powers the path down two seconds after
+    // the most recent audible interaction.
     s_codec->SetOutputMuted(true);
     vTaskDelay(pdMS_TO_TICKS(20));
+    s_ui_audio_idle_deadline_us =
+        esp_timer_get_time() + kUiAudioIdleTimeoutUs;
+}
+
+void ServiceUiAudioIdle()
+{
+    if (!s_codec || s_recording || s_ui_audio_idle_deadline_us == 0) return;
+    if (esp_timer_get_time() < s_ui_audio_idle_deadline_us) return;
+
+    s_ui_audio_idle_deadline_us = 0;
+    if (s_codec->output_enabled()) {
+        s_codec->SetOutputMuted(true);
+        vTaskDelay(pdMS_TO_TICKS(20));
+        s_codec->EnableOutput(false);
+    }
 }
 
 void PlayBootTune()
@@ -766,11 +785,9 @@ void PlayBootTune()
 
     (void)s_codec->OutputData(phrase.data(), phrase.size());
 
-    // Stay muted but leave the playback device and PA warm after boot. The
-    // previous low-latency test proved that a 40 ms cold start is too short;
-    // keeping this path ready removes that startup delay from button feedback.
     s_codec->SetOutputMuted(true);
-    vTaskDelay(pdMS_TO_TICKS(40));
+    vTaskDelay(pdMS_TO_TICKS(140));
+    s_codec->EnableOutput(false);
 }
 
 const char* ButtonName(int index)
@@ -1816,6 +1833,13 @@ void RenderClankerResult(const std::string& transcript,
 void StartCapture()
 {
     if (s_ui_mode != UiMode::kChat || s_power_menu || s_settings_open) return;
+
+    s_ui_audio_idle_deadline_us = 0;
+    if (s_codec && s_codec->output_enabled()) {
+        s_codec->SetOutputMuted(true);
+        s_codec->EnableOutput(false);
+    }
+
     s_clip.clear();
     s_last_capture = {};
     s_recording = true;
@@ -1978,6 +2002,8 @@ extern "C" void app_main(void)
     bool settings_combo_consumed = false;
 
     while (true) {
+        ServiceUiAudioIdle();
+
         if (s_power_long_pending.exchange(false)) {
             ESP_LOGI(kTag, "Power key long press: clean shutdown");
             s_power_menu = false;
@@ -2083,12 +2109,17 @@ extern "C" void app_main(void)
                 free_chat_scroll ? kChatScrollRepeatIntervalUs
                                  : kDirectionRepeatIntervalUs;
 
+            const bool direction_audible =
+                !(s_ui_mode == UiMode::kRead &&
+                  s_ui_menu == UiMenu::kNone &&
+                  !s_settings_open && !s_power_menu);
+
             const int up_now = gpio_get_level(kButtonUp);
             const int64_t now_us = esp_timer_get_time();
             if (last[1] == 1 && up_now == 0) {
                 up_down_us = now_us;
                 up_last_repeat_us = now_us;
-                HandleDirection(true, true);
+                HandleDirection(true, direction_audible);
             } else if (up_now == 0 && up_down_us != 0 &&
                        now_us - up_down_us >= repeat_delay_us &&
                        now_us - up_last_repeat_us >= repeat_interval_us) {
@@ -2106,7 +2137,7 @@ extern "C" void app_main(void)
             if (last[3] == 1 && down_now == 0) {
                 down_down_us = now_down_us;
                 down_last_repeat_us = now_down_us;
-                HandleDirection(false, true);
+                HandleDirection(false, direction_audible);
             } else if (down_now == 0 && down_down_us != 0 &&
                        now_down_us - down_down_us >= repeat_delay_us &&
                        now_down_us - down_last_repeat_us >= repeat_interval_us) {
