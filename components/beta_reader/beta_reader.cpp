@@ -1319,6 +1319,9 @@ bool OpenPath(const std::string& path)
     s_current = book;
     s_book_text = std::move(text);
     s_page = 0;
+    s_image_dimensions.clear();
+    s_image_cache = {};
+    s_image_cache_path.clear();
     BuildPageIndex();
 
     ESP_LOGI(kTag, "Opened %s: %u source bytes, %u text bytes, %u pages",
@@ -1335,6 +1338,9 @@ void CloseBook()
     s_book_text.clear();
     s_page_offsets.clear();
     s_page = 0;
+    s_image_dimensions.clear();
+    s_image_cache = {};
+    s_image_cache_path.clear();
 }
 
 bool HasOpenBook()
@@ -1381,6 +1387,40 @@ std::vector<std::string> CurrentPageLines()
             ? s_page_offsets[static_cast<size_t>(s_page + 1)]
             : s_book_text.size();
     return PageLines(start, end);
+}
+
+std::vector<PageItem> CurrentPageItems()
+{
+    if (!HasOpenBook()) return {};
+
+    const size_t start = s_page_offsets[static_cast<size_t>(s_page)];
+    const size_t end =
+        (s_page + 1 < static_cast<int>(s_page_offsets.size()))
+            ? s_page_offsets[static_cast<size_t>(s_page + 1)]
+            : s_book_text.size();
+    return PageItems(start, end);
+}
+
+const PageImage* LoadPageImage(const std::string& image_path)
+{
+    if (image_path.empty() || !HasOpenBook()) return nullptr;
+
+    if (s_image_cache_path == image_path &&
+        s_image_cache.width > 0 && s_image_cache.height > 0 &&
+        !s_image_cache.bitmap.empty()) {
+        return &s_image_cache;
+    }
+
+    PageImage decoded;
+    if (!DecodeReaderImage(image_path, &decoded)) {
+        s_image_cache = {};
+        s_image_cache_path.clear();
+        return nullptr;
+    }
+
+    s_image_cache = std::move(decoded);
+    s_image_cache_path = image_path;
+    return &s_image_cache;
 }
 
 }  // namespace beta_reader
