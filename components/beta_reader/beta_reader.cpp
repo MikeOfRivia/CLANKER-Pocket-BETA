@@ -1,5 +1,6 @@
 #include "beta_reader.h"
 #include "reader_font.h"
+#include "stb_image.h"
 
 #include <algorithm>
 #include <cctype>
@@ -36,6 +37,13 @@ constexpr int kSdClk = 16;
 constexpr int kSdCmd = 17;
 
 constexpr size_t kMaxBookTextBytes = 4 * 1024 * 1024;
+constexpr size_t kMaxEpubImageBytes = 16 * 1024 * 1024;
+constexpr int kReaderImageMaxWidth = 424;
+constexpr int kReaderImageMaxHeight = 630;
+constexpr char kPageBreakMarker = '\f';
+constexpr char kImageMarkerStart = 0x1e;
+constexpr char kImageMarkerEnd = 0x1f;
+constexpr const char* kImageMarkerLabel = "IMG:";
 
 sdmmc_card_t* s_card = nullptr;
 bool s_ready = false;
@@ -46,6 +54,8 @@ Book s_current;
 std::string s_book_text;
 std::vector<size_t> s_page_offsets;
 int s_page = 0;
+PageImage s_image_cache;
+std::string s_image_cache_path;
 
 std::string Lower(std::string s)
 {
