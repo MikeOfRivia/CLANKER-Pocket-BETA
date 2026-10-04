@@ -640,42 +640,92 @@ void PlayBootTune()
 {
     if (!s_codec) return;
 
-    // Bring the amplifier up while muted so its power transition does not
-    // become the loudest "instrument" in the boot sound.
-    s_codec->SetOutputVolume(76);
-    s_codec->SetOutputMuted(true);
-    s_codec->EnableOutput(true);
-    vTaskDelay(pdMS_TO_TICKS(140));
-    s_codec->SetOutputMuted(false);
-    vTaskDelay(pdMS_TO_TICKS(25));
-
-    // Original ominous summoning phrase: lower register, longer held notes,
-    // minor-pentatonic color and a descending answer. It evokes the dramatic
-    // monster-summoning-flute feel without reproducing an existing theme.
+    // The supplied score is two bars of 4/4. No tempo marking is visible in
+    // the excerpt, so use 120 BPM while preserving the written rhythm exactly.
+    // The treble clef carries an 8 above it, so the written C5/G4/B4/C5/D5/C5
+    // phrase sounds one octave higher: C6/G5/B5/C6/D6/C6.
     struct BootNote {
         float hz;
-        int ms;
-        int gap_ms;
+        int sixteenths;
     };
 
-    constexpr BootNote kMotif[] = {
-        {440.00f, 430, 55},   // A4
-        {587.33f, 250, 35},   // D5
-        {698.46f, 610, 150},  // F5
-        {659.25f, 210, 35},   // E5
-        {587.33f, 300, 45},   // D5
-        {523.25f, 240, 40},   // C5
-        {440.00f, 760, 0},    // A4
+    constexpr BootNote kPhrase[] = {
+        {1046.50f, 7},   // C6, double-dotted quarter
+        { 783.99f, 2},   // G5, eighth
+        { 987.77f, 6},   // B5, dotted quarter
+        {1046.50f, 1},   // C6, sixteenth
+        {1174.66f, 1},   // D6, sixteenth
+        {1046.50f, 15},  // C6, double-dotted half + tied sixteenth
     };
 
-    for (const auto& note : kMotif) {
-        PlayFluteTone(note.hz, note.ms, 76, 16500);
-        if (note.gap_ms > 0) vTaskDelay(pdMS_TO_TICKS(note.gap_ms));
+    constexpr int kSixteenthMs = 125;  // quarter note = 500 ms = 120 BPM
+    constexpr int kTotalSixteenths = 32;
+    const int total_samples =
+        (kAudioSampleRate * kSixteenthMs * kTotalSixteenths) / 1000;
+
+    std::vector<int16_t> phrase(static_cast<size_t>(total_samples), 0);
+
+    constexpr float kTwoPi = 2.0f * 3.14159265f;
+    constexpr float kAmplitude = 19000.0f;
+    constexpr float kVibratoDepth = 0.0045f;
+    constexpr float kVibratoHz = 5.1f;
+
+    float phase = 0.0f;
+    int note_index = 0;
+    int note_end_sixteenth = kPhrase[0].sixteenths;
+
+    for (int i = 0; i < total_samples; ++i) {
+        const float elapsed_ms =
+            (static_cast<float>(i) * 1000.0f) / kAudioSampleRate;
+        const int elapsed_sixteenth =
+            static_cast<int>(elapsed_ms / kSixteenthMs);
+
+        while (note_index + 1 < static_cast<int>(std::size(kPhrase)) &&
+               elapsed_sixteenth >= note_end_sixteenth) {
+            ++note_index;
+            note_end_sixteenth += kPhrase[note_index].sixteenths;
+        }
+
+        const float t = static_cast<float>(i) / kAudioSampleRate;
+        const float vibrato =
+            1.0f + kVibratoDepth * std::sin(kTwoPi * kVibratoHz * t);
+        phase += kTwoPi * kPhrase[note_index].hz * vibrato / kAudioSampleRate;
+        if (phase > kTwoPi) phase -= kTwoPi;
+
+        // Keep the phrase genuinely legato: one continuous breath/envelope
+        // across all notes, with only the written pitch changes.
+        const float attack_samples = kAudioSampleRate * 0.060f;
+        const float release_samples = kAudioSampleRate * 0.180f;
+        const float attack =
+            std::min(1.0f, static_cast<float>(i) / attack_samples);
+        const float release =
+            std::min(1.0f,
+                     static_cast<float>(total_samples - i - 1) / release_samples);
+        const float envelope = std::min(attack, release);
+
+        const float fundamental = std::sin(phase);
+        const float harmonic2 = 0.09f * std::sin(phase * 2.0f);
+        const float harmonic3 = 0.02f * std::sin(phase * 3.0f);
+        const float sample =
+            (fundamental + harmonic2 + harmonic3) * envelope * kAmplitude;
+
+        phrase[static_cast<size_t>(i)] =
+            static_cast<int16_t>(std::clamp(sample, -32760.0f, 32760.0f));
     }
 
-    // Mute first, let the last DMA frames drain, then drop the amp.
+    // Bring the amp up silently, then play the whole phrase as one continuous
+    // buffer so note boundaries do not turn into little speaker clicks.
+    s_codec->SetOutputVolume(90);
     s_codec->SetOutputMuted(true);
-    vTaskDelay(pdMS_TO_TICKS(120));
+    s_codec->EnableOutput(true);
+    vTaskDelay(pdMS_TO_TICKS(160));
+    s_codec->SetOutputMuted(false);
+    vTaskDelay(pdMS_TO_TICKS(30));
+
+    (void)s_codec->OutputData(phrase.data(), phrase.size());
+
+    s_codec->SetOutputMuted(true);
+    vTaskDelay(pdMS_TO_TICKS(140));
     s_codec->EnableOutput(false);
 }
 
