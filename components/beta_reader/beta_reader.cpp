@@ -339,16 +339,68 @@ bool ReadEpub(const std::string& path, std::string* out)
     }
 
     std::string opf_path;
-    const size_t rootfile = container.find("<rootfile");
-    if (rootfile != std::string::npos) {
-        const size_t close = container.find('>', rootfile);
-        if (close != std::string::npos) {
-            opf_path = XmlAttr(container.substr(rootfile, close - rootfile + 1), "full-path");
+
+    // Be tolerant of container.xml variations. The EPUB spec normally uses
+    // <rootfile full-path="...">, but real-world files may vary in tag case,
+    // namespace prefixing, or formatting.
+    const std::string container_lower = Lower(container);
+    size_t rootfile_name = container_lower.find("rootfile");
+    if (rootfile_name != std::string::npos) {
+        const size_t tag_start = container_lower.rfind('<', rootfile_name);
+        const size_t tag_end = container_lower.find('>', rootfile_name);
+        if (tag_start != std::string::npos && tag_end != std::string::npos &&
+            tag_end > tag_start) {
+            const std::string tag =
+                container.substr(tag_start, tag_end - tag_start + 1);
+            opf_path = XmlAttr(tag, "full-path");
+
+            // Attribute names are XML case-sensitive, but accept common
+            // non-conforming capitalization rather than rejecting the book.
+            if (opf_path.empty()) {
+                const std::string tag_lower = Lower(tag);
+                const size_t attr_pos = tag_lower.find("full-path");
+                if (attr_pos != std::string::npos) {
+                    const size_t eq = tag.find('=', attr_pos);
+                    if (eq != std::string::npos) {
+                        size_t q = eq + 1;
+                        while (q < tag.size() &&
+                               std::isspace(static_cast<unsigned char>(tag[q]))) {
+                            ++q;
+                        }
+                        if (q < tag.size() && (tag[q] == '"' || tag[q] == '\'')) {
+                            const char quote = tag[q++];
+                            const size_t end = tag.find(quote, q);
+                            if (end != std::string::npos) {
+                                opf_path = tag.substr(q, end - q);
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
+
+    if (opf_path.empty()) {
+        // Last-resort compatibility path: scan the archive for a package
+        // document instead of crashing/rejecting an otherwise readable EPUB.
+        const mz_uint count = mz_zip_reader_get_num_files(&zip);
+        for (mz_uint i = 0; i < count; ++i) {
+            mz_zip_archive_file_stat st = {};
+            if (!mz_zip_reader_file_stat(&zip, i, &st)) continue;
+            const std::string name = st.m_filename ? st.m_filename : "";
+            if (EndsWith(name, ".opf")) {
+                opf_path = name;
+                ESP_LOGW(kTag,
+                         "container.xml package lookup failed; using OPF fallback: %s",
+                         opf_path.c_str());
+                break;
+            }
+        }
+    }
+
     if (opf_path.empty()) {
         mz_zip_reader_end(&zip);
-        ESP_LOGW(kTag, "EPUB container did not identify package document");
+        ESP_LOGW(kTag, "EPUB contains no discoverable package document");
         return false;
     }
 
