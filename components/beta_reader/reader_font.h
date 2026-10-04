@@ -20,7 +20,7 @@ struct ReaderGlyph {
 constexpr int kReaderFontBaselinePx = 22;
 constexpr int kReaderLineHeightPx = 29;
 constexpr int kReaderTextWidthPx = 424;
-constexpr int kReaderLinesPerPage = 18;
+constexpr int kReaderLinesPerPage = 20;
 
 ReaderGlyph ReaderFontGlyph(char ch);
 const uint8_t* ReaderFontBitmap(const ReaderGlyph& glyph);
