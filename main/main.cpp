@@ -112,6 +112,7 @@ int64_t s_ui_audio_idle_deadline_us = 0;
 constexpr int64_t kSettingsNoticeUs = 1500000;
 constexpr int64_t kSettingsCommitUs = 3000000;
 constexpr int64_t kBootPttGraceUs = 250000;
+constexpr int64_t kSelectLongPressIgnoreUs = 1000000;
 constexpr int64_t kDirectionRepeatDelayUs = 500000;
 constexpr int64_t kDirectionRepeatIntervalUs = 220000;
 constexpr int64_t kChatScrollRepeatDelayUs = 220000;
@@ -1580,7 +1581,6 @@ void ToggleMode()
 
 void HandleDirection(bool up, bool audible = true)
 {
-    if (audible) PlayUiTick();
     if (s_settings_open) {
         if (up) s_settings_index = (s_settings_index + 2) % 3;
         else s_settings_index = (s_settings_index + 1) % 3;
@@ -1992,6 +1992,7 @@ extern "C" void app_main(void)
 
     std::array<int, 4> last = {1,1,1,1};
     int64_t boot_down_us = 0;
+    int64_t select_down_us = 0;
     int64_t settings_combo_started_us = 0;
     int64_t up_down_us = 0;
     int64_t down_down_us = 0;
@@ -2002,8 +2003,6 @@ extern "C" void app_main(void)
     bool settings_combo_consumed = false;
 
     while (true) {
-        ServiceUiAudioIdle();
-
         if (s_power_long_pending.exchange(false)) {
             ESP_LOGI(kTag, "Power key long press: clean shutdown");
             s_power_menu = false;
@@ -2017,7 +2016,6 @@ extern "C" void app_main(void)
         }
 
         if (s_power_short_pending.exchange(false)) {
-            PlayUiTick();
             ESP_LOGI(kTag, "Power key short press: power menu");
             s_power_menu = true;
             s_ui_menu = UiMenu::kNone;
@@ -2029,17 +2027,23 @@ extern "C" void app_main(void)
         const int select_now = gpio_get_level(kButtonSelect);
 
         if (last[0] == 1 && boot_now == 0) {
-            PlayUiTick();
             boot_down_us = esp_timer_get_time();
             boot_consumed = false;
         }
         if (last[2] == 1 && select_now == 0) {
-            PlayUiTick();
+            select_down_us = esp_timer_get_time();
             select_consumed = false;
         }
 
         const bool settings_combo =
             boot_now == 0 && select_now == 0 && !s_power_menu && !s_recording;
+
+        if (select_now == 0 && boot_now == 1 && select_down_us != 0 &&
+            !select_consumed &&
+            (esp_timer_get_time() - select_down_us) >= kSelectLongPressIgnoreUs) {
+            select_consumed = true;
+            ESP_LOGI(kTag, "SELECT long press ignored");
+        }
         if (settings_combo) {
             if (settings_combo_started_us == 0) {
                 settings_combo_started_us = esp_timer_get_time();
@@ -2094,6 +2098,7 @@ extern "C" void app_main(void)
                 if (!select_consumed && boot_now == 1) {
                     HandleSelectShort(false);
                 }
+                select_down_us = 0;
                 select_consumed = false;
             }
             last[2] = select_now;
