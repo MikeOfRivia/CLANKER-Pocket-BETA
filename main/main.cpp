@@ -599,46 +599,11 @@ void PlayTone(float frequency_hz, int duration_ms, int volume = 32,
 
 void PlayUiTick()
 {
-    if (!s_codec || s_recording) return;
-
-    constexpr int kDurationMs = 48;
-    constexpr int kVolume = 68;
-    constexpr int kAmplitude = 18500;
-    const int samples = std::max(1, (kAudioSampleRate * kDurationMs) / 1000);
-    std::vector<int16_t> click(static_cast<size_t>(samples), 0);
-
-    constexpr float kTwoPi = 2.0f * 3.14159265f;
-    for (int i = 0; i < samples; ++i) {
-        const float t = static_cast<float>(i) / kAudioSampleRate;
-        const float life =
-            1.0f - static_cast<float>(i) / static_cast<float>(samples);
-        const float envelope = life * life;
-        const float wave =
-            std::sin(kTwoPi * 1450.0f * t) +
-            0.55f * std::sin(kTwoPi * 2550.0f * t);
-        const float sample = (wave / 1.55f) * envelope * kAmplitude;
-        click[static_cast<size_t>(i)] =
-            static_cast<int16_t>(std::clamp(sample, -32760.0f, 32760.0f));
-    }
-
-    const bool already_enabled = s_codec->output_enabled();
-    s_codec->SetOutputVolume(kVolume);
-    if (!already_enabled) {
-        s_codec->SetOutputMuted(true);
-        s_codec->EnableOutput(true);
-        vTaskDelay(pdMS_TO_TICKS(80));
-    }
-
-    s_codec->SetOutputMuted(false);
-    vTaskDelay(pdMS_TO_TICKS(6));
-    (void)s_codec->OutputData(click.data(), click.size());
-    vTaskDelay(pdMS_TO_TICKS(kDurationMs + 18));
-
-    if (!already_enabled) {
-        s_codec->SetOutputMuted(true);
-        vTaskDelay(pdMS_TO_TICKS(20));
-        s_codec->EnableOutput(false);
-    }
+    // Deliberately obnoxious diagnostic feedback: every physical button edge
+    // that requests UI feedback gets a half-second middle-C tone. If this does
+    // not sound, the problem is below the UI event layer.
+    ESP_LOGI(kTag, "UI BUTTON BEEP: C4 261.63 Hz / 500 ms");
+    PlayTone(261.63f, 500, 90, 22000);
 }
 
 void PlayBootTune()
