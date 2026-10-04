@@ -580,8 +580,8 @@ void PlayUiTick()
     PlayTone(1250.0f, 32, 36, 10000);
 }
 
-void PlayFluteTone(float frequency_hz, int duration_ms, int volume = 58,
-                   int amplitude = 12500)
+void PlayFluteTone(float frequency_hz, int duration_ms, int volume = 76,
+                   int amplitude = 16500)
 {
     if (!s_codec || s_recording || duration_ms <= 0) return;
 
@@ -601,8 +601,8 @@ void PlayFluteTone(float frequency_hz, int duration_ms, int volume = 58,
         if (phase > kTwoPi) phase -= kTwoPi;
 
         const float fundamental = std::sin(phase);
-        const float harmonic2 = 0.16f * std::sin(phase * 2.0f);
-        const float harmonic3 = 0.035f * std::sin(phase * 3.0f);
+        const float harmonic2 = 0.10f * std::sin(phase * 2.0f);
+        const float harmonic3 = 0.025f * std::sin(phase * 3.0f);
 
         const float attack =
             std::min(1.0f, static_cast<float>(i) /
@@ -640,14 +640,18 @@ void PlayBootTune()
 {
     if (!s_codec) return;
 
-    s_codec->SetOutputVolume(58);
-    s_codec->SetOutputMuted(false);
+    // Bring the amplifier up while muted so its power transition does not
+    // become the loudest "instrument" in the boot sound.
+    s_codec->SetOutputVolume(76);
+    s_codec->SetOutputMuted(true);
     s_codec->EnableOutput(true);
-    vTaskDelay(pdMS_TO_TICKS(100));
+    vTaskDelay(pdMS_TO_TICKS(140));
+    s_codec->SetOutputMuted(false);
+    vTaskDelay(pdMS_TO_TICKS(25));
 
-    // Original CLANKER Pocket "summoning flute" startup motif: eerie,
-    // pentatonic, and deliberately reminiscent of classic tokusatsu monster
-    // summoning music without reproducing any existing melody.
+    // Original ominous summoning phrase: lower register, longer held notes,
+    // minor-pentatonic color and a descending answer. It evokes the dramatic
+    // monster-summoning-flute feel without reproducing an existing theme.
     struct BootNote {
         float hz;
         int ms;
@@ -655,22 +659,23 @@ void PlayBootTune()
     };
 
     constexpr BootNote kMotif[] = {
+        {440.00f, 430, 55},   // A4
+        {587.33f, 250, 35},   // D5
+        {698.46f, 610, 150},  // F5
+        {659.25f, 210, 35},   // E5
         {587.33f, 300, 45},   // D5
-        {698.46f, 230, 35},   // F5
-        {880.00f, 360, 70},   // A5
-        {783.99f, 220, 35},   // G5
-        {1046.50f, 340, 55},  // C6
-        {880.00f, 250, 45},   // A5
-        {1174.66f, 520, 0},   // D6
+        {523.25f, 240, 40},   // C5
+        {440.00f, 760, 0},    // A4
     };
 
     for (const auto& note : kMotif) {
-        PlayFluteTone(note.hz, note.ms, 58, 12500);
+        PlayFluteTone(note.hz, note.ms, 76, 16500);
         if (note.gap_ms > 0) vTaskDelay(pdMS_TO_TICKS(note.gap_ms));
     }
 
+    // Mute first, let the last DMA frames drain, then drop the amp.
     s_codec->SetOutputMuted(true);
-    vTaskDelay(pdMS_TO_TICKS(40));
+    vTaskDelay(pdMS_TO_TICKS(120));
     s_codec->EnableOutput(false);
 }
 
