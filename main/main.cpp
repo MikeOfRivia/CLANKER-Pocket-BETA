@@ -13,6 +13,7 @@
 #include "axp2101.h"
 #include "beta_network.h"
 #include "beta_reader.h"
+#include "reader_font.h"
 #include "beta_clanker.h"
 #include "beta_transcription.h"
 #include "board_es8311_codec.h"
@@ -238,6 +239,30 @@ void DrawText(uint8_t* fb, int x, int y, const char* text, int scale)
             }
         }
         cursor += 6 * scale;
+    }
+}
+
+void DrawReaderText(uint8_t* fb, int x, int y, const std::string& text)
+{
+    int cursor = x;
+    const int baseline = y + beta_reader::kReaderFontBaselinePx;
+
+    for (char ch : text) {
+        const beta_reader::ReaderGlyph& glyph = beta_reader::ReaderFontGlyph(ch);
+        const uint8_t* bitmap = beta_reader::ReaderFontBitmap(glyph);
+        const int pixel_count = static_cast<int>(glyph.width) * glyph.height;
+
+        for (int bit = 0; bit < pixel_count; ++bit) {
+            if ((bitmap[bit >> 3] & (0x80u >> (bit & 7))) == 0) continue;
+            const int row = bit / glyph.width;
+            const int col = bit % glyph.width;
+            Pixel(fb,
+                  cursor + glyph.x_offset + col,
+                  baseline + glyph.y_offset + row,
+                  true);
+        }
+
+        cursor += glyph.advance;
     }
 }
 
@@ -996,6 +1021,26 @@ std::string ClipDisplayText(const std::string& input, size_t max_chars)
     return text.substr(0, max_chars - 3) + "...";
 }
 
+std::string ClipReaderTextToWidth(const std::string& input, int max_width)
+{
+    if (beta_reader::ReaderFontMeasure(input) <= max_width) return input;
+
+    const std::string ellipsis = "...";
+    const int ellipsis_width = beta_reader::ReaderFontMeasure(ellipsis);
+    std::string clipped;
+    int width = 0;
+
+    for (char ch : input) {
+        const int advance = beta_reader::ReaderFontAdvance(ch);
+        if (width + advance + ellipsis_width > max_width) break;
+        clipped.push_back(ch);
+        width += advance;
+    }
+
+    while (!clipped.empty() && clipped.back() == ' ') clipped.pop_back();
+    return clipped + ellipsis;
+}
+
 void DrawReadBody(uint8_t* fb)
 {
     if (!s_reader_in_book) {
@@ -1034,9 +1079,10 @@ void DrawReadBody(uint8_t* fb)
             const int idx = start_index + row;
             if (idx >= static_cast<int>(books.size())) break;
             const bool selected = idx == s_reader_library_index;
-            const std::string title = ClipDisplayText(books[static_cast<size_t>(idx)].name, 30);
-            DrawText(fb, 28, y, selected ? ">" : " ", 2);
-            DrawText(fb, 52, y, title.c_str(), 2);
+            const std::string title =
+                ClipReaderTextToWidth(books[static_cast<size_t>(idx)].name, 382);
+            DrawText(fb, 28, y + 5, selected ? ">" : " ", 2);
+            DrawReaderText(fb, 52, y, title);
             y += 55;
         }
 
@@ -1054,24 +1100,28 @@ void DrawReadBody(uint8_t* fb)
     }
 
     s_reader_page = beta_reader::CurrentPage();
-    char page[40] = {};
-    std::snprintf(page, sizeof(page), "%d/%d",
-                  s_reader_page + 1, beta_reader::PageCount());
 
-    const std::string title = ClipDisplayText(beta_reader::CurrentName(), 25);
-    DrawText(fb, 24, 120, title.c_str(), 2);
-    DrawText(fb, 378, 120, page, 1);
-    DrawDivider(fb, 158);
+    // The book view gets real typography; the tiny 5x7 UI font is intentionally
+    // kept for chrome and diagnostics only.
+    const std::string title =
+        ClipReaderTextToWidth(beta_reader::CurrentName(), 330);
+    DrawReaderText(fb, 24, 114, title);
+    DrawDivider(fb, 154);
 
     const auto lines = beta_reader::CurrentPageLines();
-    int y = 182;
-    for (size_t i = 0; i < lines.size() && i < 21; ++i) {
-        const std::string line = DisplaySafeUpper(lines[i]);
-        DrawText(fb, 28, y, line.c_str(), 2);
-        y += 24;
+    int y = 170;
+    for (size_t i = 0;
+         i < lines.size() && i < static_cast<size_t>(beta_reader::kReaderLinesPerPage);
+         ++i) {
+        DrawReaderText(fb, 28, y, lines[i]);
+        y += beta_reader::kReaderLineHeightPx;
     }
 
-    DrawText(fb, 132, 684, "UP/DOWN PAGE", 1);
+    char page[48] = {};
+    std::snprintf(page, sizeof(page), "PAGE %d OF %d",
+                  s_reader_page + 1, beta_reader::PageCount());
+    const int footer_width = static_cast<int>(std::strlen(page)) * 6;
+    DrawText(fb, (kPortraitWidth - footer_width) / 2, 744, page, 1);
 }
 
 void RenderReaderOpening(const std::string& title)
