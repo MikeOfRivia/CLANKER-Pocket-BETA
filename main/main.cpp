@@ -98,7 +98,7 @@ MicState s_mic_state = MicState::kIdle;
 UiMenu s_ui_menu = UiMenu::kNone;
 std::vector<ChatMessage> s_chat_messages;
 std::string s_previous_response_id;
-int s_chat_scroll_offset = 0;
+int s_chat_scroll_px = 0;
 int s_menu_index = 0;
 bool s_reader_in_book = false;
 int s_reader_page = 0;
@@ -113,6 +113,9 @@ constexpr int64_t kSettingsCommitUs = 3000000;
 constexpr int64_t kBootPttGraceUs = 250000;
 constexpr int64_t kDirectionRepeatDelayUs = 500000;
 constexpr int64_t kDirectionRepeatIntervalUs = 220000;
+constexpr int64_t kChatScrollRepeatDelayUs = 300000;
+constexpr int64_t kChatScrollRepeatIntervalUs = 120000;
+constexpr int kChatScrollStepPx = 10;
 constexpr int kReaderFullRefreshEveryPages = 10;
 constexpr int kChatVisibleMessages = 4;
 
@@ -953,8 +956,13 @@ void LoadUiState()
         s_ui_mode = mode == 1 ? UiMode::kRead : UiMode::kChat;
     }
     int32_t scroll = 0;
-    if (nvs_get_i32(handle, "chat_scroll", &scroll) == ESP_OK) {
-        s_chat_scroll_offset = std::max(0, static_cast<int>(scroll));
+    if (nvs_get_i32(handle, "chat_scroll_px", &scroll) == ESP_OK) {
+        s_chat_scroll_px = std::max(0, static_cast<int>(scroll));
+    } else if (nvs_get_i32(handle, "chat_scroll", &scroll) == ESP_OK) {
+        // One-time migration from the old line-based scroll position.
+        s_chat_scroll_px =
+            std::max(0, static_cast<int>(scroll)) *
+            beta_reader::kReaderLineHeightPx;
     }
     int32_t page = 0;
     if (nvs_get_i32(handle, "reader_page", &page) == ESP_OK) {
@@ -993,7 +1001,7 @@ void SaveUiState()
     nvs_handle_t handle = 0;
     if (nvs_open("ui_state", NVS_READWRITE, &handle) != ESP_OK) return;
     nvs_set_u8(handle, "mode", s_ui_mode == UiMode::kRead ? 1 : 0);
-    nvs_set_i32(handle, "chat_scroll", s_chat_scroll_offset);
+    nvs_set_i32(handle, "chat_scroll_px", s_chat_scroll_px);
     nvs_set_i32(handle, "reader_page", s_reader_page);
     nvs_set_u8(handle, "reader_open", s_reader_in_book ? 1 : 0);
     nvs_set_str(handle, "reader_book",
@@ -1017,7 +1025,7 @@ void ClearChat()
 {
     s_chat_messages.clear();
     s_previous_response_id.clear();
-    s_chat_scroll_offset = 0;
+    s_chat_scroll_px = 0;
     SaveUiState();
 }
 
@@ -1158,14 +1166,12 @@ int ChatTranscriptHeight()
     return height;
 }
 
-int ChatMaxScrollLines()
+int ChatMaxScrollPx()
 {
     constexpr int kBodyTop = 112;
     constexpr int kBodyBottom = 688;
-    const int line_step = beta_reader::kReaderLineHeightPx;
-    const int overflow = std::max(
+    return std::max(
         0, ChatTranscriptHeight() - (kBodyBottom - kBodyTop));
-    return (overflow + line_step - 1) / line_step;
 }
 
 void DrawChatMessageClipped(uint8_t* fb, int y, const ChatMessage& msg,
@@ -1213,21 +1219,19 @@ void DrawChatBody(uint8_t* fb)
     constexpr int kBodyBottom = 688;
     constexpr int kBodyHeight = kBodyBottom - kBodyTop;
     constexpr int kGap = 10;
-    const int line_step = beta_reader::kReaderLineHeightPx;
-
     if (s_chat_messages.empty()) {
         DrawText(fb, 104, 300, "HOLD BOOT TO TALK", 3);
         DrawText(fb, 91, 355, "UP DOWN SCROLL CHAT", 2);
     } else {
         const int transcript_h = ChatTranscriptHeight();
         const int overflow = std::max(0, transcript_h - kBodyHeight);
-        const int max_scroll = ChatMaxScrollLines();
-        s_chat_scroll_offset =
-            std::clamp(s_chat_scroll_offset, 0, max_scroll);
+        const int max_scroll = ChatMaxScrollPx();
+        s_chat_scroll_px =
+            std::clamp(s_chat_scroll_px, 0, max_scroll);
 
-        // Offset is measured in text lines from the newest/bottom position.
-        const int scroll_px =
-            std::min(overflow, s_chat_scroll_offset * line_step);
+        // Pixel-based offset gives the e-paper chat view finer, less chunky
+        // movement than jumping an entire serif text line per button press.
+        const int scroll_px = std::min(overflow, s_chat_scroll_px);
         int y = overflow > 0
             ? kBodyTop - overflow + scroll_px
             : kBodyTop;
@@ -1493,9 +1497,9 @@ void ToggleMode()
     (void)s_panel->RefreshFastBase();
 }
 
-void HandleDirection(bool up)
+void HandleDirection(bool up, bool audible = true)
 {
-    PlayUiTick();
+    if (audible) PlayUiTick();
     if (s_settings_open) {
         if (up) s_settings_index = (s_settings_index + 2) % 3;
         else s_settings_index = (s_settings_index + 1) % 3;
@@ -1527,15 +1531,14 @@ void HandleDirection(bool up)
     }
 
     if (s_ui_mode == UiMode::kChat) {
-        const int max_offset = ChatMaxScrollLines();
+        const int max_scroll = ChatMaxScrollPx();
         if (up) {
-            s_chat_scroll_offset =
-                std::min(max_offset, s_chat_scroll_offset + 1);
+            s_chat_scroll_px =
+                std::min(max_scroll, s_chat_scroll_px + kChatScrollStepPx);
         } else {
-            s_chat_scroll_offset =
-                std::max(0, s_chat_scroll_offset - 1);
+            s_chat_scroll_px =
+                std::max(0, s_chat_scroll_px - kChatScrollStepPx);
         }
-        SaveUiState();
         RenderUi();
         RefreshUiPartial();
         return;
@@ -1571,9 +1574,9 @@ void HandleDirection(bool up)
     }
 }
 
-void HandleSelectShort()
+void HandleSelectShort(bool audible = true)
 {
-    PlayUiTick();
+    if (audible) PlayUiTick();
     if (s_settings_open) {
         if (s_settings_index == 0) {
             beta_network::RunHttpsProbe();
@@ -1808,7 +1811,7 @@ void FinishCapture()
     if (net.mode != beta_network::Mode::kConnected || !beta_transcription::HasApiKey()) {
         s_chat_messages.push_back({false, "NETWORK OR OPENAI NOT READY"});
         s_mic_state = MicState::kIdle;
-        s_chat_scroll_offset = 0;
+        s_chat_scroll_px = 0;
         SaveUiState();
         RenderUi();
         RefreshUiPartial();
@@ -1820,7 +1823,7 @@ void FinishCapture()
     if (!tx.success) {
         s_chat_messages.push_back({false, "TRANSCRIPTION FAILED " + tx.error_code});
         s_mic_state = MicState::kIdle;
-        s_chat_scroll_offset = 0;
+        s_chat_scroll_px = 0;
         SaveUiState();
         RenderUi();
         RefreshUiPartial();
@@ -1828,7 +1831,7 @@ void FinishCapture()
     }
 
     s_chat_messages.push_back({true, tx.transcript});
-    s_chat_scroll_offset = 0;
+    s_chat_scroll_px = 0;
     RenderUi();
     RefreshUiPartial();
 
@@ -1842,7 +1845,7 @@ void FinishCapture()
     }
 
     s_mic_state = MicState::kIdle;
-    s_chat_scroll_offset = 0;
+    s_chat_scroll_px = 0;
     SaveUiState();
     RenderUi();
     RefreshUiPartial();
@@ -1922,6 +1925,7 @@ extern "C" void app_main(void)
         }
 
         if (s_power_short_pending.exchange(false)) {
+            PlayUiTick();
             ESP_LOGI(kTag, "Power key short press: power menu");
             s_power_menu = true;
             s_ui_menu = UiMenu::kNone;
@@ -1933,10 +1937,12 @@ extern "C" void app_main(void)
         const int select_now = gpio_get_level(kButtonSelect);
 
         if (last[0] == 1 && boot_now == 0) {
+            PlayUiTick();
             boot_down_us = esp_timer_get_time();
             boot_consumed = false;
         }
         if (last[2] == 1 && select_now == 0) {
+            PlayUiTick();
             select_consumed = false;
         }
 
@@ -1994,24 +2000,36 @@ extern "C" void app_main(void)
         if (!s_recording) {
             if (last[2] == 0 && select_now == 1) {
                 if (!select_consumed && boot_now == 1) {
-                    HandleSelectShort();
+                    HandleSelectShort(false);
                 }
                 select_consumed = false;
             }
             last[2] = select_now;
+
+            const bool free_chat_scroll =
+                s_ui_mode == UiMode::kChat &&
+                s_ui_menu == UiMenu::kNone &&
+                !s_settings_open && !s_power_menu;
+            const int64_t repeat_delay_us =
+                free_chat_scroll ? kChatScrollRepeatDelayUs
+                                 : kDirectionRepeatDelayUs;
+            const int64_t repeat_interval_us =
+                free_chat_scroll ? kChatScrollRepeatIntervalUs
+                                 : kDirectionRepeatIntervalUs;
 
             const int up_now = gpio_get_level(kButtonUp);
             const int64_t now_us = esp_timer_get_time();
             if (last[1] == 1 && up_now == 0) {
                 up_down_us = now_us;
                 up_last_repeat_us = now_us;
-                HandleDirection(true);
+                HandleDirection(true, true);
             } else if (up_now == 0 && up_down_us != 0 &&
-                       now_us - up_down_us >= kDirectionRepeatDelayUs &&
-                       now_us - up_last_repeat_us >= kDirectionRepeatIntervalUs) {
+                       now_us - up_down_us >= repeat_delay_us &&
+                       now_us - up_last_repeat_us >= repeat_interval_us) {
                 up_last_repeat_us = now_us;
-                HandleDirection(true);
+                HandleDirection(true, false);
             } else if (last[1] == 0 && up_now == 1) {
+                if (free_chat_scroll) SaveUiState();
                 up_down_us = 0;
                 up_last_repeat_us = 0;
             }
@@ -2022,13 +2040,14 @@ extern "C" void app_main(void)
             if (last[3] == 1 && down_now == 0) {
                 down_down_us = now_down_us;
                 down_last_repeat_us = now_down_us;
-                HandleDirection(false);
+                HandleDirection(false, true);
             } else if (down_now == 0 && down_down_us != 0 &&
-                       now_down_us - down_down_us >= kDirectionRepeatDelayUs &&
-                       now_down_us - down_last_repeat_us >= kDirectionRepeatIntervalUs) {
+                       now_down_us - down_down_us >= repeat_delay_us &&
+                       now_down_us - down_last_repeat_us >= repeat_interval_us) {
                 down_last_repeat_us = now_down_us;
-                HandleDirection(false);
+                HandleDirection(false, false);
             } else if (last[3] == 0 && down_now == 1) {
+                if (free_chat_scroll) SaveUiState();
                 down_down_us = 0;
                 down_last_repeat_us = 0;
             }
