@@ -16,7 +16,8 @@ private:
     const audio_codec_if_t* codec_if_ = nullptr;
     const audio_codec_gpio_if_t* gpio_if_ = nullptr;
 
-    esp_codec_dev_handle_t dev_ = nullptr;
+    esp_codec_dev_handle_t playback_dev_ = nullptr;
+    esp_codec_dev_handle_t record_dev_ = nullptr;
     gpio_num_t pa_pin_ = GPIO_NUM_NC;
     bool pa_inverted_ = false;
     bool channels_enabled_ = false;
@@ -26,6 +27,8 @@ private:
                               gpio_num_t din);
     void SetChannelsEnabled(bool enabled);
     void UpdatePaState();
+    void EnsurePlaybackDevice();
+    void EnsureRecordDevice();
     void UpdateDeviceState();
 
     int Read(int16_t* dest, int samples) override;
