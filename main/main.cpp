@@ -580,8 +580,8 @@ void PlayUiTick()
     PlayTone(1250.0f, 32, 36, 10000);
 }
 
-void PlayFluteTone(float frequency_hz, int duration_ms, int volume = 38,
-                   int amplitude = 10500)
+void PlayFluteTone(float frequency_hz, int duration_ms, int volume = 58,
+                   int amplitude = 12500)
 {
     if (!s_codec || s_recording || duration_ms <= 0) return;
 
@@ -640,7 +640,7 @@ void PlayBootTune()
 {
     if (!s_codec) return;
 
-    s_codec->SetOutputVolume(38);
+    s_codec->SetOutputVolume(58);
     s_codec->SetOutputMuted(false);
     s_codec->EnableOutput(true);
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -665,7 +665,7 @@ void PlayBootTune()
     };
 
     for (const auto& note : kMotif) {
-        PlayFluteTone(note.hz, note.ms, 38, 10200);
+        PlayFluteTone(note.hz, note.ms, 58, 12500);
         if (note.gap_ms > 0) vTaskDelay(pdMS_TO_TICKS(note.gap_ms));
     }
 
