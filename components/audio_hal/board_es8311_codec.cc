@@ -1,5 +1,6 @@
 #include "board_es8311_codec.h"
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <esp_log.h>
