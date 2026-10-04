@@ -131,12 +131,69 @@ std::string DirName(const std::string& path)
     return slash == std::string::npos ? std::string() : path.substr(0, slash + 1);
 }
 
+std::string PercentDecodePath(const std::string& value)
+{
+    auto hex = [](char ch) -> int {
+        if (ch >= '0' && ch <= '9') return ch - '0';
+        if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+        if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+        return -1;
+    };
+
+    std::string out;
+    out.reserve(value.size());
+    for (size_t i = 0; i < value.size(); ++i) {
+        if (value[i] == '%' && i + 2 < value.size()) {
+            const int hi = hex(value[i + 1]);
+            const int lo = hex(value[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out.push_back(static_cast<char>((hi << 4) | lo));
+                i += 2;
+                continue;
+            }
+        }
+        out.push_back(value[i]);
+    }
+    return out;
+}
+
 std::string JoinZipPath(const std::string& base, const std::string& relative)
 {
-    if (relative.empty()) return relative;
-    if (relative.front() == '/') return relative.substr(1);
-    if (base.empty()) return relative;
-    return base + relative;
+    if (relative.empty()) return {};
+
+    std::string clean = relative;
+    const size_t cut = clean.find_first_of("?#");
+    if (cut != std::string::npos) clean.resize(cut);
+    clean = PercentDecodePath(clean);
+    if (clean.empty()) return {};
+
+    std::string combined;
+    if (clean.front() == '/') combined = clean.substr(1);
+    else combined = base + clean;
+
+    std::vector<std::string> parts;
+    size_t start = 0;
+    while (start <= combined.size()) {
+        const size_t slash = combined.find('/', start);
+        const size_t end = slash == std::string::npos ? combined.size() : slash;
+        const std::string part = combined.substr(start, end - start);
+        if (part.empty() || part == ".") {
+            // no-op
+        } else if (part == "..") {
+            if (!parts.empty()) parts.pop_back();
+        } else {
+            parts.push_back(part);
+        }
+        if (slash == std::string::npos) break;
+        start = slash + 1;
+    }
+
+    std::string out;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (i > 0) out.push_back('/');
+        out.append(parts[i]);
+    }
+    return out;
 }
 
 std::string XmlAttr(const std::string& tag, const char* attr)
@@ -151,6 +208,31 @@ std::string XmlAttr(const std::string& tag, const char* attr)
     const size_t end = tag.find(quote, p);
     if (end == std::string::npos) return {};
     return tag.substr(p, end - p);
+}
+
+std::string XmlAttrInsensitive(const std::string& tag, const char* attr)
+{
+    const std::string low = Lower(tag);
+    const std::string name = Lower(attr);
+    size_t p = 0;
+    while ((p = low.find(name, p)) != std::string::npos) {
+        const bool left_ok =
+            p == 0 || std::isspace(static_cast<unsigned char>(low[p - 1]));
+        size_t q = p + name.size();
+        while (q < low.size() && std::isspace(static_cast<unsigned char>(low[q]))) ++q;
+        if (!left_ok || q >= low.size() || low[q] != '=') {
+            p += name.size();
+            continue;
+        }
+        ++q;
+        while (q < tag.size() && std::isspace(static_cast<unsigned char>(tag[q]))) ++q;
+        if (q >= tag.size() || (tag[q] != '"' && tag[q] != '\'')) return {};
+        const char quote = tag[q++];
+        const size_t end = tag.find(quote, q);
+        if (end == std::string::npos) return {};
+        return tag.substr(q, end - q);
+    }
+    return {};
 }
 
 bool ZipExtractText(mz_zip_archive* zip, const std::string& name, std::string* out)
