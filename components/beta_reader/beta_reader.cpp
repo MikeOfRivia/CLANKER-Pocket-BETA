@@ -982,7 +982,58 @@ void BuildPageIndex()
     std::string line;
     line.reserve(64);
 
+    auto add_page_start = [&](size_t offset) {
+        if (offset >= s_book_text.size()) return;
+        if (s_page_offsets.empty() || s_page_offsets.back() != offset) {
+            s_page_offsets.push_back(offset);
+        }
+    };
+
     while (pos < s_book_text.size()) {
+        if (s_book_text[pos] == kPageBreakMarker) {
+            const size_t next = SkipFlowWhitespace(pos + 1);
+            if (next >= s_book_text.size()) {
+                pos = next;
+                break;
+            }
+
+            // A chapter marker means the following content starts a fresh page.
+            // If the marker itself is already the page start, just move that
+            // start past the control byte rather than creating a blank page.
+            if (line_count == 0 && !s_page_offsets.empty() &&
+                s_page_offsets.back() == pos) {
+                s_page_offsets.back() = next;
+            } else {
+                add_page_start(next);
+            }
+            pos = next;
+            line_count = 0;
+            continue;
+        }
+
+        std::string image_path;
+        size_t image_next = pos;
+        if (ParseImageMarkerAt(pos, &image_path, &image_next)) {
+            const int units = ReaderImageLineUnits(image_path);
+
+            // Keep the entire illustration together. If it will not fit in
+            // the remaining vertical space, start it at the top of a page.
+            if (line_count > 0 && line_count + units > kReaderLinesPerPage) {
+                add_page_start(pos);
+                line_count = 0;
+                continue;
+            }
+
+            pos = SkipFlowWhitespace(image_next);
+            line_count += units;
+            if (line_count >= kReaderLinesPerPage &&
+                pos < s_book_text.size()) {
+                add_page_start(pos);
+                line_count = 0;
+            }
+            continue;
+        }
+
         const size_t next = BuildWrappedLine(pos, &line);
         if (next <= pos) {
             ESP_LOGW(kTag, "Pagination made no progress at byte %u",
@@ -994,9 +1045,16 @@ void BuildPageIndex()
 
         ++line_count;
         if (line_count >= kReaderLinesPerPage && pos < s_book_text.size()) {
-            s_page_offsets.push_back(pos);
+            add_page_start(pos);
             line_count = 0;
         }
+    }
+
+    // A trailing control marker can move the sole page start to EOF.
+    if (!s_page_offsets.empty() &&
+        s_page_offsets.back() >= s_book_text.size() &&
+        s_page_offsets.size() > 1) {
+        s_page_offsets.pop_back();
     }
 
     ESP_LOGI(kTag, "Pagination complete: %u pages",
@@ -1004,18 +1062,62 @@ void BuildPageIndex()
     LogMemory("after pagination");
 }
 
-std::vector<std::string> PageLines(size_t start, size_t end)
+std::vector<PageItem> PageItems(size_t start, size_t end)
 {
-    std::vector<std::string> lines;
-    lines.reserve(kReaderLinesPerPage);
+    std::vector<PageItem> items;
+    items.reserve(kReaderLinesPerPage);
 
     size_t pos = start;
-    while (pos < end && lines.size() < static_cast<size_t>(kReaderLinesPerPage)) {
+    int used_units = 0;
+
+    while (pos < end && used_units < kReaderLinesPerPage) {
+        if (s_book_text[pos] == kPageBreakMarker) {
+            pos = SkipFlowWhitespace(pos + 1);
+            continue;
+        }
+
+        std::string image_path;
+        size_t image_next = pos;
+        if (ParseImageMarkerAt(pos, &image_path, &image_next)) {
+            const auto dims = ReaderImageDimensions(image_path);
+            const int units = ReaderImageLineUnits(image_path);
+
+            PageItem item;
+            item.image = true;
+            item.content = image_path;
+            item.image_width = dims.first;
+            item.image_height = dims.second;
+            item.line_units = units;
+            items.push_back(std::move(item));
+
+            used_units += units;
+            pos = SkipFlowWhitespace(image_next);
+            continue;
+        }
+
         std::string line;
         const size_t next = BuildWrappedLine(pos, &line);
         if (next <= pos) break;
-        lines.push_back(std::move(line));
+
+        PageItem item;
+        item.image = false;
+        item.content = std::move(line);
+        item.line_units = 1;
+        items.push_back(std::move(item));
+
+        ++used_units;
         pos = next;
+    }
+
+    return items;
+}
+
+std::vector<std::string> PageLines(size_t start, size_t end)
+{
+    std::vector<std::string> lines;
+    const auto items = PageItems(start, end);
+    for (const auto& item : items) {
+        if (!item.image) lines.push_back(item.content);
     }
     return lines;
 }
