@@ -1101,15 +1101,11 @@ void DrawReadBody(uint8_t* fb)
 
     s_reader_page = beta_reader::CurrentPage();
 
-    // The book view gets real typography; the tiny 5x7 UI font is intentionally
-    // kept for chrome and diagnostics only.
-    const std::string title =
-        ClipReaderTextToWidth(beta_reader::CurrentName(), 330);
-    DrawReaderText(fb, 24, 114, title);
-    DrawDivider(fb, 154);
-
+    // Keep the reading surface clean: no repeating book title or divider.
+    // The persistent top bar still provides device context, while the extra
+    // vertical room is used for two additional lines of book text.
     const auto lines = beta_reader::CurrentPageLines();
-    int y = 170;
+    int y = 112;
     for (size_t i = 0;
          i < lines.size() && i < static_cast<size_t>(beta_reader::kReaderLinesPerPage);
          ++i) {
