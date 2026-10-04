@@ -599,9 +599,9 @@ void PlayTone(float frequency_hz, int duration_ms, int volume = 32,
 
 void PlayUiTick()
 {
-    // Real UI feedback: a short bright chirp in the range this tiny speaker
-    // reproduces well, with a much shorter PA wake/settle delay than the
-    // diagnostic C6 beep.
+    // Keep the playback path warm between UI interactions. Cold-starting the
+    // PA/codec takes roughly the same 160+ ms ramp used by the proven boot
+    // tune; once warm, a button chirp can begin almost immediately.
     constexpr int kDurationMs = 70;
     constexpr int kVolume = 76;
     constexpr int kAmplitude = 20000;
@@ -639,17 +639,25 @@ void PlayUiTick()
     }
 
     s_codec->SetOutputVolume(kVolume);
-    s_codec->SetOutputMuted(true);
-    s_codec->EnableOutput(true);
-    vTaskDelay(pdMS_TO_TICKS(40));
-    s_codec->SetOutputMuted(false);
-    vTaskDelay(pdMS_TO_TICKS(5));
+
+    if (!s_codec->output_enabled()) {
+        // Fallback for any path that truly powered audio down. This first
+        // feedback event will be delayed, but subsequent ones remain warm.
+        s_codec->SetOutputMuted(true);
+        s_codec->EnableOutput(true);
+        vTaskDelay(pdMS_TO_TICKS(160));
+        s_codec->SetOutputMuted(false);
+        vTaskDelay(pdMS_TO_TICKS(30));
+    } else {
+        s_codec->SetOutputMuted(false);
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
 
     (void)s_codec->OutputData(tone.data(), tone.size());
 
+    // Mute between interactions, but deliberately leave playback/PA enabled.
     s_codec->SetOutputMuted(true);
     vTaskDelay(pdMS_TO_TICKS(20));
-    s_codec->EnableOutput(false);
 }
 
 void PlayBootTune()
@@ -758,9 +766,11 @@ void PlayBootTune()
 
     (void)s_codec->OutputData(phrase.data(), phrase.size());
 
+    // Stay muted but leave the playback device and PA warm after boot. The
+    // previous low-latency test proved that a 40 ms cold start is too short;
+    // keeping this path ready removes that startup delay from button feedback.
     s_codec->SetOutputMuted(true);
-    vTaskDelay(pdMS_TO_TICKS(140));
-    s_codec->EnableOutput(false);
+    vTaskDelay(pdMS_TO_TICKS(40));
 }
 
 const char* ButtonName(int index)
