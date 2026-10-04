@@ -1074,6 +1074,21 @@ void DrawReadBody(uint8_t* fb)
     DrawText(fb, 132, 684, "UP/DOWN PAGE", 1);
 }
 
+void RenderReaderOpening(const std::string& title)
+{
+    auto* fb = s_panel->framebuffer();
+    s_panel->Clear(true);
+    DrawTopBar(fb);
+
+    DrawText(fb, 58, 245, "OPENING BOOK", 4);
+    DrawDivider(fb, 315);
+
+    const std::string clipped = ClipDisplayText(title, 28);
+    DrawText(fb, 44, 360, clipped.c_str(), 2);
+    DrawText(fb, 86, 445, "READING EPUB...", 2);
+    DrawText(fb, 93, 505, "PLEASE WAIT", 2);
+}
+
 
 void DrawSettingsBody(uint8_t* fb)
 {
@@ -1313,6 +1328,9 @@ void HandleSelectShort()
             const std::string selected_path = books[static_cast<size_t>(idx)].path;
             if (!beta_reader::HasOpenBook() ||
                 beta_reader::CurrentPath() != selected_path) {
+                RenderReaderOpening(books[static_cast<size_t>(idx)].name);
+                (void)s_panel->RefreshFastBase();
+
                 if (beta_reader::OpenBook(static_cast<size_t>(idx))) {
                     s_reader_page = 0;
                     beta_reader::SetPage(0);
