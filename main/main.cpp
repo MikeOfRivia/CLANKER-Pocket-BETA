@@ -599,51 +599,56 @@ void PlayTone(float frequency_hz, int duration_ms, int volume = 32,
 
 void PlayUiTick()
 {
-    // Diagnostic tone deliberately moved into the speaker's known-good range:
-    // the boot phrase is clearly audible around C6, whereas C4 (261.63 Hz) is
-    // below what this tiny speaker appears to reproduce usefully.
-    constexpr float kHz = 1046.50f;  // C6
-    constexpr int kDurationMs = 500;
-    constexpr int kVolume = 90;
-    constexpr int kAmplitude = 22000;
+    // Real UI feedback: a short bright chirp in the range this tiny speaker
+    // reproduces well, with a much shorter PA wake/settle delay than the
+    // diagnostic C6 beep.
+    constexpr int kDurationMs = 70;
+    constexpr int kVolume = 76;
+    constexpr int kAmplitude = 20000;
+    constexpr float kStartHz = 1046.50f;  // C6
+    constexpr float kEndHz = 1567.98f;    // G6
 
-    ESP_LOGI(kTag, "UI BUTTON BEEP: C6 1046.50 Hz / 500 ms");
     if (!s_codec || s_recording) return;
 
     const int samples = std::max(1, (kAudioSampleRate * kDurationMs) / 1000);
     std::vector<int16_t> tone(static_cast<size_t>(samples), 0);
     constexpr float kTwoPi = 2.0f * 3.14159265f;
+    float phase = 0.0f;
+
     for (int i = 0; i < samples; ++i) {
-        const float t = static_cast<float>(i) / kAudioSampleRate;
+        const float progress =
+            static_cast<float>(i) / static_cast<float>(std::max(1, samples - 1));
+        const float hz = kStartHz + (kEndHz - kStartHz) * progress;
+        phase += kTwoPi * hz / kAudioSampleRate;
+        if (phase > kTwoPi) phase -= kTwoPi;
+
         const float attack =
             std::min(1.0f, static_cast<float>(i) /
-                               static_cast<float>(kAudioSampleRate * 0.025f));
+                               static_cast<float>(kAudioSampleRate * 0.006f));
         const float release =
             std::min(1.0f,
                      static_cast<float>(samples - i - 1) /
-                         static_cast<float>(kAudioSampleRate * 0.080f));
+                         static_cast<float>(kAudioSampleRate * 0.028f));
         const float envelope = std::min(attack, release);
         const float wave =
-            1.00f * std::sin(kTwoPi * kHz * t) +
-            0.40f * std::sin(kTwoPi * kHz * 2.0f * t) +
-            0.18f * std::sin(kTwoPi * kHz * 3.0f * t);
-        const float sample = (wave / 1.58f) * envelope * kAmplitude;
+            1.00f * std::sin(phase) +
+            0.35f * std::sin(phase * 2.0f);
+        const float sample = (wave / 1.35f) * envelope * kAmplitude;
         tone[static_cast<size_t>(i)] =
             static_cast<int16_t>(std::clamp(sample, -32760.0f, 32760.0f));
     }
 
-    // Match the known-good boot-tune playback sequence exactly.
     s_codec->SetOutputVolume(kVolume);
     s_codec->SetOutputMuted(true);
     s_codec->EnableOutput(true);
-    vTaskDelay(pdMS_TO_TICKS(160));
+    vTaskDelay(pdMS_TO_TICKS(40));
     s_codec->SetOutputMuted(false);
-    vTaskDelay(pdMS_TO_TICKS(30));
+    vTaskDelay(pdMS_TO_TICKS(5));
 
     (void)s_codec->OutputData(tone.data(), tone.size());
 
     s_codec->SetOutputMuted(true);
-    vTaskDelay(pdMS_TO_TICKS(140));
+    vTaskDelay(pdMS_TO_TICKS(20));
     s_codec->EnableOutput(false);
 }
 
