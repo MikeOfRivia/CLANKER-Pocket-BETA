@@ -689,6 +689,221 @@ bool ReadEpub(const std::string& path, std::string* out)
     return !out->empty();
 }
 
+bool ParseImageMarkerAt(size_t pos, std::string* path, size_t* next)
+{
+    if (pos >= s_book_text.size() || s_book_text[pos] != kImageMarkerStart) {
+        return false;
+    }
+
+    const size_t label_start = pos + 1;
+    const size_t label_len = std::strlen(kImageMarkerLabel);
+    if (label_start + label_len > s_book_text.size() ||
+        s_book_text.compare(label_start, label_len, kImageMarkerLabel) != 0) {
+        return false;
+    }
+
+    const size_t path_start = label_start + label_len;
+    const size_t end = s_book_text.find(kImageMarkerEnd, path_start);
+    if (end == std::string::npos) return false;
+
+    if (path) *path = s_book_text.substr(path_start, end - path_start);
+    if (next) *next = end + 1;
+    return true;
+}
+
+size_t SkipFlowWhitespace(size_t pos)
+{
+    while (pos < s_book_text.size()) {
+        const char ch = s_book_text[pos];
+        if (ch != ' ' && ch != '\n' && ch != '\r' && ch != '\t') break;
+        ++pos;
+    }
+    return pos;
+}
+
+bool ExtractCurrentEpubFile(const std::string& zip_path, void** data, size_t* size)
+{
+    if (!data || !size || s_current.path.empty() ||
+        !EndsWith(s_current.path, ".epub")) {
+        return false;
+    }
+
+    *data = nullptr;
+    *size = 0;
+
+    mz_zip_archive zip = {};
+    if (!mz_zip_reader_init_file(&zip, s_current.path.c_str(), 0)) {
+        ESP_LOGW(kTag, "Image: unable to reopen EPUB");
+        return false;
+    }
+
+    const int index =
+        mz_zip_reader_locate_file(&zip, zip_path.c_str(), nullptr, 0);
+    if (index < 0) {
+        ESP_LOGW(kTag, "Image missing from EPUB: %s", zip_path.c_str());
+        mz_zip_reader_end(&zip);
+        return false;
+    }
+
+    void* extracted =
+        mz_zip_reader_extract_to_heap(&zip, static_cast<mz_uint>(index), size, 0);
+    mz_zip_reader_end(&zip);
+
+    if (!extracted) return false;
+    if (*size == 0 || *size > kMaxEpubImageBytes) {
+        ESP_LOGW(kTag, "Image rejected (%u bytes): %s",
+                 static_cast<unsigned>(*size), zip_path.c_str());
+        mz_free(extracted);
+        *size = 0;
+        return false;
+    }
+
+    *data = extracted;
+    return true;
+}
+
+std::pair<int, int> FitReaderImage(int source_width, int source_height)
+{
+    if (source_width <= 0 || source_height <= 0) return {0, 0};
+
+    int width = source_width;
+    int height = source_height;
+
+    // Do not enlarge small illustrations; only shrink images that would exceed
+    // the readable page area.
+    if (width > kReaderImageMaxWidth) {
+        height = std::max(
+            1, static_cast<int>(
+                   (static_cast<int64_t>(height) * kReaderImageMaxWidth) /
+                   width));
+        width = kReaderImageMaxWidth;
+    }
+    if (height > kReaderImageMaxHeight) {
+        width = std::max(
+            1, static_cast<int>(
+                   (static_cast<int64_t>(width) * kReaderImageMaxHeight) /
+                   height));
+        height = kReaderImageMaxHeight;
+    }
+    return {width, height};
+}
+
+std::pair<int, int> ReaderImageDimensions(const std::string& image_path)
+{
+    const auto found = s_image_dimensions.find(image_path);
+    if (found != s_image_dimensions.end()) return found->second;
+
+    void* bytes = nullptr;
+    size_t byte_count = 0;
+    if (!ExtractCurrentEpubFile(image_path, &bytes, &byte_count)) return {0, 0};
+
+    int source_width = 0;
+    int source_height = 0;
+    int channels = 0;
+    const int ok = stbi_info_from_memory(
+        static_cast<const stbi_uc*>(bytes), static_cast<int>(byte_count),
+        &source_width, &source_height, &channels);
+    mz_free(bytes);
+
+    if (!ok) {
+        ESP_LOGW(kTag, "Unsupported/corrupt EPUB image: %s", image_path.c_str());
+        return {0, 0};
+    }
+
+    const auto fitted = FitReaderImage(source_width, source_height);
+    s_image_dimensions[image_path] = fitted;
+    ESP_LOGI(kTag, "Image layout %s: %dx%d -> %dx%d",
+             image_path.c_str(), source_width, source_height,
+             fitted.first, fitted.second);
+    return fitted;
+}
+
+int ReaderImageLineUnits(const std::string& image_path)
+{
+    const auto dims = ReaderImageDimensions(image_path);
+    if (dims.first <= 0 || dims.second <= 0) return 1;
+
+    constexpr int kImageVerticalMargin = 10;
+    const int block_height = dims.second + kImageVerticalMargin;
+    return std::clamp(
+        (block_height + kReaderLineHeightPx - 1) / kReaderLineHeightPx,
+        1, kReaderLinesPerPage);
+}
+
+bool DecodeReaderImage(const std::string& image_path, PageImage* out)
+{
+    if (!out) return false;
+    *out = {};
+
+    const auto dims = ReaderImageDimensions(image_path);
+    if (dims.first <= 0 || dims.second <= 0) return false;
+
+    void* bytes = nullptr;
+    size_t byte_count = 0;
+    if (!ExtractCurrentEpubFile(image_path, &bytes, &byte_count)) return false;
+
+    int source_width = 0;
+    int source_height = 0;
+    int channels = 0;
+    stbi_uc* rgba = stbi_load_from_memory(
+        static_cast<const stbi_uc*>(bytes), static_cast<int>(byte_count),
+        &source_width, &source_height, &channels, 4);
+    mz_free(bytes);
+
+    if (!rgba || source_width <= 0 || source_height <= 0) {
+        if (rgba) stbi_image_free(rgba);
+        ESP_LOGW(kTag, "Image decode failed: %s", image_path.c_str());
+        return false;
+    }
+
+    out->width = dims.first;
+    out->height = dims.second;
+    const size_t pixel_count =
+        static_cast<size_t>(out->width) * static_cast<size_t>(out->height);
+    out->bitmap.assign((pixel_count + 7) / 8, 0);
+
+    static constexpr uint8_t kBayer4[4][4] = {
+        { 0,  8,  2, 10},
+        {12,  4, 14,  6},
+        { 3, 11,  1,  9},
+        {15,  7, 13,  5},
+    };
+
+    for (int y = 0; y < out->height; ++y) {
+        const int sy = std::min(
+            source_height - 1,
+            static_cast<int>(
+                (static_cast<int64_t>(y) * source_height) / out->height));
+        for (int x = 0; x < out->width; ++x) {
+            const int sx = std::min(
+                source_width - 1,
+                static_cast<int>(
+                    (static_cast<int64_t>(x) * source_width) / out->width));
+            const size_t src =
+                (static_cast<size_t>(sy) * source_width + sx) * 4;
+
+            const int r = rgba[src + 0];
+            const int g = rgba[src + 1];
+            const int b = rgba[src + 2];
+            const int a = rgba[src + 3];
+            int gray = (77 * r + 150 * g + 29 * b) >> 8;
+            gray = (gray * a + 255 * (255 - a)) / 255;
+
+            const int threshold =
+                static_cast<int>(kBayer4[y & 3][x & 3]) * 16 + 8;
+            if (gray < threshold) {
+                const size_t bit =
+                    static_cast<size_t>(y) * out->width + x;
+                out->bitmap[bit >> 3] |=
+                    static_cast<uint8_t>(0x80u >> (bit & 7));
+            }
+        }
+    }
+
+    stbi_image_free(rgba);
+    return true;
+}
+
 size_t BuildWrappedLine(size_t start, std::string* line)
 {
     line->clear();
@@ -706,11 +921,15 @@ size_t BuildWrappedLine(size_t start, std::string* line)
     while (pos < size && s_book_text[pos] == ' ') ++pos;
 
     int line_width = 0;
-    while (pos < size && s_book_text[pos] != '\n') {
+    while (pos < size && s_book_text[pos] != '\n' &&
+           s_book_text[pos] != kPageBreakMarker &&
+           s_book_text[pos] != kImageMarkerStart) {
         const size_t word_start = pos;
         int word_width = 0;
         while (pos < size && s_book_text[pos] != ' ' &&
-               s_book_text[pos] != '\n' && s_book_text[pos] != '\r') {
+               s_book_text[pos] != '\n' && s_book_text[pos] != '\r' &&
+               s_book_text[pos] != kPageBreakMarker &&
+               s_book_text[pos] != kImageMarkerStart) {
             word_width += ReaderFontAdvance(s_book_text[pos]);
             ++pos;
         }
