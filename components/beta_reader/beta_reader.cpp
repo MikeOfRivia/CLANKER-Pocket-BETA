@@ -387,7 +387,7 @@ bool ReadEpub(const std::string& path, std::string* out)
         for (mz_uint i = 0; i < count; ++i) {
             mz_zip_archive_file_stat st = {};
             if (!mz_zip_reader_file_stat(&zip, i, &st)) continue;
-            const std::string name = st.m_filename ? st.m_filename : "";
+            const std::string name = st.m_filename;
             if (EndsWith(name, ".opf")) {
                 opf_path = name;
                 ESP_LOGW(kTag,
