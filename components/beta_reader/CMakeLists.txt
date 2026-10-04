@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "beta_reader.cpp"
+    SRCS "beta_reader.cpp" "reader_font.cpp"
     INCLUDE_DIRS "."
     REQUIRES fatfs sdmmc esp_full_miniz
 )
