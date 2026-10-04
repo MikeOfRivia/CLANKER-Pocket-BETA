@@ -792,6 +792,133 @@ void DrawWrappedText(uint8_t* fb, int x, int y, const std::string& input,
     }
 }
 
+std::string ReaderSafeAscii(const std::string& input)
+{
+    std::string out;
+    out.reserve(input.size());
+
+    for (size_t i = 0; i < input.size();) {
+        const unsigned char ch = static_cast<unsigned char>(input[i]);
+
+        if (ch < 0x80) {
+            if (ch == '\n' || ch == '\r' || ch == '\t' ||
+                (ch >= 0x20 && ch <= 0x7e)) {
+                out.push_back(ch == '\t' ? ' ' : static_cast<char>(ch));
+            }
+            ++i;
+            continue;
+        }
+
+        // Normalize punctuation ChatGPT commonly emits so the vendored serif
+        // font receives one printable ASCII glyph instead of UTF-8 byte soup.
+        if (i + 2 < input.size() &&
+            static_cast<unsigned char>(input[i]) == 0xe2 &&
+            static_cast<unsigned char>(input[i + 1]) == 0x80) {
+            const unsigned char tail = static_cast<unsigned char>(input[i + 2]);
+            if (tail == 0x98 || tail == 0x99) out.push_back('\'');
+            else if (tail == 0x9c || tail == 0x9d) out.push_back('"');
+            else if (tail == 0x93 || tail == 0x94) out.push_back('-');
+            else if (tail == 0xa2) out.push_back('*');
+            else if (tail == 0xa6) out.append("...");
+            else out.push_back('?');
+            i += 3;
+            continue;
+        }
+
+        if (i + 1 < input.size() &&
+            static_cast<unsigned char>(input[i]) == 0xc2 &&
+            static_cast<unsigned char>(input[i + 1]) == 0xa0) {
+            out.push_back(' ');
+            i += 2;
+            continue;
+        }
+
+        // Collapse any other UTF-8 code point to a single fallback glyph.
+        out.push_back('?');
+        ++i;
+        while (i < input.size() &&
+               (static_cast<unsigned char>(input[i]) & 0xc0) == 0x80) {
+            ++i;
+        }
+    }
+
+    return out;
+}
+
+std::vector<std::string> WrapReaderTextLines(const std::string& input, int max_width)
+{
+    std::vector<std::string> lines;
+    const std::string text = ReaderSafeAscii(input);
+    size_t pos = 0;
+
+    while (pos < text.size()) {
+        while (pos < text.size() && text[pos] == '\r') ++pos;
+        if (pos >= text.size()) break;
+
+        if (text[pos] == '\n') {
+            lines.emplace_back();
+            ++pos;
+            continue;
+        }
+
+        while (pos < text.size() && text[pos] == ' ') ++pos;
+        if (pos >= text.size()) break;
+
+        std::string line;
+        int line_width = 0;
+
+        while (pos < text.size() && text[pos] != '\n') {
+            while (pos < text.size() && text[pos] == ' ') ++pos;
+            if (pos >= text.size() || text[pos] == '\n') break;
+
+            const size_t word_start = pos;
+            int word_width = 0;
+            while (pos < text.size() && text[pos] != ' ' &&
+                   text[pos] != '\n' && text[pos] != '\r') {
+                word_width += beta_reader::ReaderFontAdvance(text[pos]);
+                ++pos;
+            }
+            const size_t word_end = pos;
+
+            const int gap =
+                line.empty() ? 0 : beta_reader::ReaderFontAdvance(' ');
+            if (line_width + gap + word_width <= max_width) {
+                if (!line.empty()) {
+                    line.push_back(' ');
+                    line_width += gap;
+                }
+                line.append(text, word_start, word_end - word_start);
+                line_width += word_width;
+                continue;
+            }
+
+            if (!line.empty()) {
+                pos = word_start;
+                break;
+            }
+
+            // One huge token: split it at the last glyph that fits.
+            size_t cut = word_start;
+            while (cut < word_end) {
+                const int advance = beta_reader::ReaderFontAdvance(text[cut]);
+                if (cut > word_start && line_width + advance > max_width) break;
+                line.push_back(text[cut]);
+                line_width += advance;
+                ++cut;
+            }
+            pos = cut > word_start ? cut : word_start + 1;
+            break;
+        }
+
+        lines.push_back(std::move(line));
+        while (pos < text.size() && text[pos] == '\r') ++pos;
+        if (pos < text.size() && text[pos] == '\n') ++pos;
+    }
+
+    if (lines.empty()) lines.emplace_back();
+    return lines;
+}
+
 
 void DrawOutlineRect(uint8_t* fb, int x, int y, int w, int h, int thickness = 2)
 {
@@ -979,28 +1106,30 @@ void DrawMicIcon(uint8_t* fb)
     }
 }
 
-int ChatMessageMaxChars(const ChatMessage& msg)
-{
-    return msg.user ? 27 : 34;
-}
-
 int ChatMessageWidth(const ChatMessage& msg)
 {
     return msg.user ? 336 : 432;
 }
 
+int ChatMessageTextWidth(const ChatMessage& msg)
+{
+    constexpr int kHorizontalPadding = 24;
+    return ChatMessageWidth(msg) - kHorizontalPadding;
+}
+
 int ChatMessageLineCount(const ChatMessage& msg)
 {
     return static_cast<int>(
-        WrapTextLines(msg.text, ChatMessageMaxChars(msg)).size());
+        WrapReaderTextLines(msg.text, ChatMessageTextWidth(msg)).size());
 }
 
 int ChatMessageHeight(const ChatMessage& msg)
 {
-    constexpr int kLineStep = 24;
-    constexpr int kPadTop = 14;
-    constexpr int kPadBottom = 14;
-    return kPadTop + ChatMessageLineCount(msg) * kLineStep + kPadBottom;
+    constexpr int kPadTop = 8;
+    constexpr int kPadBottom = 8;
+    return kPadTop +
+           ChatMessageLineCount(msg) * beta_reader::kReaderLineHeightPx +
+           kPadBottom;
 }
 
 int ChatTranscriptHeight()
@@ -1018,17 +1147,18 @@ int ChatMaxScrollLines()
 {
     constexpr int kBodyTop = 112;
     constexpr int kBodyBottom = 688;
-    constexpr int kLineStep = 24;
+    const int line_step = beta_reader::kReaderLineHeightPx;
     const int overflow = std::max(
         0, ChatTranscriptHeight() - (kBodyBottom - kBodyTop));
-    return (overflow + kLineStep - 1) / kLineStep;
+    return (overflow + line_step - 1) / line_step;
 }
 
 void DrawChatMessageClipped(uint8_t* fb, int y, const ChatMessage& msg,
                             int clip_top, int clip_bottom)
 {
-    constexpr int kLineStep = 24;
-    constexpr int kTextHeight = 14;
+    constexpr int kPadTop = 8;
+    constexpr int kTextInset = 12;
+    const int line_step = beta_reader::kReaderLineHeightPx;
 
     const int w = ChatMessageWidth(msg);
     const int x = msg.user ? (kPortraitWidth - 24 - w) : 24;
@@ -1053,11 +1183,12 @@ void DrawChatMessageClipped(uint8_t* fb, int y, const ChatMessage& msg,
         FillRect(fb, x + w - 2, side_top, 2, side_bottom - side_top, true);
     }
 
-    const auto lines = WrapTextLines(msg.text, ChatMessageMaxChars(msg));
+    const auto lines =
+        WrapReaderTextLines(msg.text, ChatMessageTextWidth(msg));
     for (size_t i = 0; i < lines.size(); ++i) {
-        const int line_y = y + 14 + static_cast<int>(i) * kLineStep;
-        if (line_y < clip_top || line_y + kTextHeight > clip_bottom) continue;
-        DrawText(fb, x + 12, line_y, lines[i].c_str(), 2);
+        const int line_y = y + kPadTop + static_cast<int>(i) * line_step;
+        if (line_y < clip_top || line_y + line_step > clip_bottom) continue;
+        DrawReaderText(fb, x + kTextInset, line_y, lines[i]);
     }
 }
 
@@ -1067,7 +1198,7 @@ void DrawChatBody(uint8_t* fb)
     constexpr int kBodyBottom = 688;
     constexpr int kBodyHeight = kBodyBottom - kBodyTop;
     constexpr int kGap = 10;
-    constexpr int kLineStep = 24;
+    const int line_step = beta_reader::kReaderLineHeightPx;
 
     if (s_chat_messages.empty()) {
         DrawText(fb, 104, 300, "HOLD BOOT TO TALK", 3);
@@ -1081,7 +1212,7 @@ void DrawChatBody(uint8_t* fb)
 
         // Offset is measured in text lines from the newest/bottom position.
         const int scroll_px =
-            std::min(overflow, s_chat_scroll_offset * kLineStep);
+            std::min(overflow, s_chat_scroll_offset * line_step);
         int y = overflow > 0
             ? kBodyTop - overflow + scroll_px
             : kBodyTop;
