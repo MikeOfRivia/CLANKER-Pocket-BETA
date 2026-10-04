@@ -602,7 +602,7 @@ void PlayBootTune()
         {1046.50f, 15},  // C6, double-dotted half + tied sixteenth
     };
 
-    constexpr int kSixteenthMs = 125;  // quarter note = 500 ms = 120 BPM
+    constexpr int kSixteenthMs = 110;  // quarter note = 440 ms ~= 136 BPM
     constexpr int kTotalSixteenths = 32;
     const int total_samples =
         (kAudioSampleRate * kSixteenthMs * kTotalSixteenths) / 1000;
@@ -610,7 +610,7 @@ void PlayBootTune()
     std::vector<int16_t> phrase(static_cast<size_t>(total_samples), 0);
 
     constexpr float kTwoPi = 2.0f * 3.14159265f;
-    constexpr float kAmplitude = 20500.0f;
+    constexpr float kAmplitude = 18200.0f;
     constexpr float kVibratoDepth = 0.0018f;
     constexpr float kVibratoHz = 5.4f;
 
@@ -677,7 +677,7 @@ void PlayBootTune()
 
     // Bring the amp up silently, then play the whole brass phrase as one
     // continuous buffer so note boundaries do not turn into speaker clicks.
-    s_codec->SetOutputVolume(90);
+    s_codec->SetOutputVolume(80);
     s_codec->SetOutputMuted(true);
     s_codec->EnableOutput(true);
     vTaskDelay(pdMS_TO_TICKS(160));
