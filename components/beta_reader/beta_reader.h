@@ -16,6 +16,13 @@ struct Book {
     uint32_t size_bytes = 0;
 };
 
+struct PageImage {
+    int width = 0;
+    int height = 0;
+    // Packed 1-bit pixels, row-major, MSB first. A set bit means black ink.
+    std::vector<uint8_t> bitmap;
+};
+
 esp_err_t Init();
 bool Ready();
 esp_err_t LastError();
@@ -34,6 +41,7 @@ int PageCount();
 int CurrentPage();
 void SetPage(int page);
 std::vector<std::string> CurrentPageLines();
+const PageImage* CurrentPageImage();
 
 }  // namespace beta_reader
 
