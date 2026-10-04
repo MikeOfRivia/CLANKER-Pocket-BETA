@@ -113,9 +113,10 @@ constexpr int64_t kSettingsCommitUs = 3000000;
 constexpr int64_t kBootPttGraceUs = 250000;
 constexpr int64_t kDirectionRepeatDelayUs = 500000;
 constexpr int64_t kDirectionRepeatIntervalUs = 220000;
-constexpr int64_t kChatScrollRepeatDelayUs = 300000;
-constexpr int64_t kChatScrollRepeatIntervalUs = 120000;
-constexpr int kChatScrollStepPx = 10;
+constexpr int64_t kChatScrollRepeatDelayUs = 220000;
+constexpr int64_t kChatScrollRepeatIntervalUs = 60000;
+constexpr int kChatScrollTapStepPx = 28;
+constexpr int kChatScrollHoldStepPx = 116;
 constexpr int kReaderFullRefreshEveryPages = 10;
 constexpr int kChatVisibleMessages = 4;
 
@@ -565,37 +566,79 @@ void PlayTone(float frequency_hz, int duration_ms, int volume = 32,
     std::vector<int16_t> tone(static_cast<size_t>(samples), 0);
     for (int i = 0; i < samples; ++i) {
         const float t = static_cast<float>(i) / kAudioSampleRate;
-        const float fade_in = std::min(1.0f, static_cast<float>(i) / 64.0f);
+        const float fade_in = std::min(1.0f, static_cast<float>(i) / 40.0f);
         const float fade_out =
-            std::min(1.0f, static_cast<float>(samples - i - 1) / 96.0f);
+            std::min(1.0f, static_cast<float>(samples - i - 1) / 80.0f);
         const float envelope = std::min(fade_in, fade_out);
         tone[static_cast<size_t>(i)] =
             static_cast<int16_t>(std::sin(2.0f * 3.14159265f * frequency_hz * t) *
                                  envelope * amplitude);
     }
 
-    s_codec->SetOutputVolume(volume);
-    s_codec->SetOutputMuted(false);
     const bool already_enabled = s_codec->output_enabled();
+    s_codec->SetOutputVolume(volume);
     if (!already_enabled) {
+        // Bring PA/codec up silently first. Unmuting before PA enable made very
+        // short UI sounds easy to lose in the amplifier transition.
+        s_codec->SetOutputMuted(true);
         s_codec->EnableOutput(true);
-        // The board's speaker amp needs a moment after PA enable.
         vTaskDelay(pdMS_TO_TICKS(80));
     }
 
+    s_codec->SetOutputMuted(false);
+    vTaskDelay(pdMS_TO_TICKS(8));
     (void)s_codec->OutputData(tone.data(), tone.size());
-    vTaskDelay(pdMS_TO_TICKS(duration_ms + 35));
+    vTaskDelay(pdMS_TO_TICKS(duration_ms + 20));
 
     if (!keep_output_enabled && !already_enabled) {
         s_codec->SetOutputMuted(true);
-        vTaskDelay(pdMS_TO_TICKS(20));
+        vTaskDelay(pdMS_TO_TICKS(25));
         s_codec->EnableOutput(false);
     }
 }
 
 void PlayUiTick()
 {
-    PlayTone(1250.0f, 32, 36, 10000);
+    if (!s_codec || s_recording) return;
+
+    constexpr int kDurationMs = 48;
+    constexpr int kVolume = 68;
+    constexpr int kAmplitude = 18500;
+    const int samples = std::max(1, (kAudioSampleRate * kDurationMs) / 1000);
+    std::vector<int16_t> click(static_cast<size_t>(samples), 0);
+
+    constexpr float kTwoPi = 2.0f * 3.14159265f;
+    for (int i = 0; i < samples; ++i) {
+        const float t = static_cast<float>(i) / kAudioSampleRate;
+        const float life =
+            1.0f - static_cast<float>(i) / static_cast<float>(samples);
+        const float envelope = life * life;
+        const float wave =
+            std::sin(kTwoPi * 1450.0f * t) +
+            0.55f * std::sin(kTwoPi * 2550.0f * t);
+        const float sample = (wave / 1.55f) * envelope * kAmplitude;
+        click[static_cast<size_t>(i)] =
+            static_cast<int16_t>(std::clamp(sample, -32760.0f, 32760.0f));
+    }
+
+    const bool already_enabled = s_codec->output_enabled();
+    s_codec->SetOutputVolume(kVolume);
+    if (!already_enabled) {
+        s_codec->SetOutputMuted(true);
+        s_codec->EnableOutput(true);
+        vTaskDelay(pdMS_TO_TICKS(80));
+    }
+
+    s_codec->SetOutputMuted(false);
+    vTaskDelay(pdMS_TO_TICKS(6));
+    (void)s_codec->OutputData(click.data(), click.size());
+    vTaskDelay(pdMS_TO_TICKS(kDurationMs + 18));
+
+    if (!already_enabled) {
+        s_codec->SetOutputMuted(true);
+        vTaskDelay(pdMS_TO_TICKS(20));
+        s_codec->EnableOutput(false);
+    }
 }
 
 void PlayBootTune()
@@ -1532,12 +1575,14 @@ void HandleDirection(bool up, bool audible = true)
 
     if (s_ui_mode == UiMode::kChat) {
         const int max_scroll = ChatMaxScrollPx();
+        const int step_px =
+            audible ? kChatScrollTapStepPx : kChatScrollHoldStepPx;
         if (up) {
             s_chat_scroll_px =
-                std::min(max_scroll, s_chat_scroll_px + kChatScrollStepPx);
+                std::min(max_scroll, s_chat_scroll_px + step_px);
         } else {
             s_chat_scroll_px =
-                std::max(0, s_chat_scroll_px - kChatScrollStepPx);
+                std::max(0, s_chat_scroll_px - step_px);
         }
         RenderUi();
         RefreshUiPartial();
