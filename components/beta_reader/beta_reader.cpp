@@ -1,4 +1,5 @@
 #include "beta_reader.h"
+#include "reader_font.h"
 
 #include <algorithm>
 #include <cctype>
@@ -34,8 +35,6 @@ constexpr int kSdD3 = 18;
 constexpr int kSdClk = 16;
 constexpr int kSdCmd = 17;
 
-constexpr int kCharsPerLine = 34;
-constexpr int kLinesPerPage = 21;
 constexpr size_t kMaxBookTextBytes = 4 * 1024 * 1024;
 
 sdmmc_card_t* s_card = nullptr;
@@ -515,6 +514,66 @@ bool ReadEpub(const std::string& path, std::string* out)
     return !out->empty();
 }
 
+size_t BuildWrappedLine(size_t start, std::string* line)
+{
+    line->clear();
+    const size_t size = s_book_text.size();
+    if (start >= size) return size;
+
+    size_t pos = start;
+    while (pos < size && s_book_text[pos] == '\r') ++pos;
+    if (pos >= size) return size;
+
+    // A paragraph break becomes a real blank line. This gives prose breathing
+    // room instead of crushing every paragraph into a continuous wall of text.
+    if (s_book_text[pos] == '\n') return pos + 1;
+
+    while (pos < size && s_book_text[pos] == ' ') ++pos;
+
+    int line_width = 0;
+    while (pos < size && s_book_text[pos] != '\n') {
+        const size_t word_start = pos;
+        int word_width = 0;
+        while (pos < size && s_book_text[pos] != ' ' &&
+               s_book_text[pos] != '\n' && s_book_text[pos] != '\r') {
+            word_width += ReaderFontAdvance(s_book_text[pos]);
+            ++pos;
+        }
+        const size_t word_end = pos;
+
+        const int gap = line->empty() ? 0 : ReaderFontAdvance(' ');
+        if (line_width + gap + word_width <= kReaderTextWidthPx) {
+            if (!line->empty()) {
+                line->push_back(' ');
+                line_width += gap;
+            }
+            line->append(s_book_text, word_start, word_end - word_start);
+            line_width += word_width;
+        } else if (!line->empty()) {
+            return word_start;
+        } else {
+            // A single unbroken token wider than the page gets split at the
+            // last glyph that fits, rather than overflowing the framebuffer.
+            size_t cut = word_start;
+            while (cut < word_end) {
+                const int advance = ReaderFontAdvance(s_book_text[cut]);
+                if (cut > word_start && line_width + advance > kReaderTextWidthPx) break;
+                line->push_back(s_book_text[cut]);
+                line_width += advance;
+                ++cut;
+            }
+            return cut > word_start ? cut : word_start + 1;
+        }
+
+        while (pos < size && s_book_text[pos] == ' ') ++pos;
+        while (pos < size && s_book_text[pos] == '\r') ++pos;
+    }
+
+    // Deliberately leave a trailing newline for the next call so it renders as
+    // a blank paragraph spacer line.
+    return pos;
+}
+
 void BuildPageIndex()
 {
     ESP_LOGI(kTag, "Pagination begin: %u text bytes",
@@ -524,26 +583,25 @@ void BuildPageIndex()
     s_page_offsets.clear();
     s_page_offsets.push_back(0);
 
-    int col = 0;
-    int line = 0;
-    for (size_t i = 0; i < s_book_text.size(); ++i) {
-        const char ch = s_book_text[i];
-        if (ch == '\r') continue;
-        if (ch == '\n') {
-            ++line;
-            col = 0;
+    size_t pos = 0;
+    int line_count = 0;
+    std::string line;
+    line.reserve(64);
+
+    while (pos < s_book_text.size()) {
+        const size_t next = BuildWrappedLine(pos, &line);
+        if (next <= pos) {
+            ESP_LOGW(kTag, "Pagination made no progress at byte %u",
+                     static_cast<unsigned>(pos));
+            ++pos;
         } else {
-            ++col;
-            if (col >= kCharsPerLine) {
-                ++line;
-                col = 0;
-            }
+            pos = next;
         }
 
-        if (line >= kLinesPerPage && i + 1 < s_book_text.size()) {
-            s_page_offsets.push_back(i + 1);
-            line = 0;
-            col = 0;
+        ++line_count;
+        if (line_count >= kReaderLinesPerPage && pos < s_book_text.size()) {
+            s_page_offsets.push_back(pos);
+            line_count = 0;
         }
     }
 
@@ -555,25 +613,16 @@ void BuildPageIndex()
 std::vector<std::string> PageLines(size_t start, size_t end)
 {
     std::vector<std::string> lines;
-    std::string line;
-    line.reserve(kCharsPerLine);
+    lines.reserve(kReaderLinesPerPage);
 
-    for (size_t i = start; i < end && lines.size() < kLinesPerPage; ++i) {
-        const char ch = s_book_text[i];
-        if (ch == '\r') continue;
-        if (ch == '\n') {
-            lines.push_back(line);
-            line.clear();
-            continue;
-        }
-        line.push_back(ch);
-        if (static_cast<int>(line.size()) >= kCharsPerLine) {
-            lines.push_back(line);
-            line.clear();
-        }
+    size_t pos = start;
+    while (pos < end && lines.size() < static_cast<size_t>(kReaderLinesPerPage)) {
+        std::string line;
+        const size_t next = BuildWrappedLine(pos, &line);
+        if (next <= pos) break;
+        lines.push_back(std::move(line));
+        pos = next;
     }
-
-    if (!line.empty() && lines.size() < kLinesPerPage) lines.push_back(line);
     return lines;
 }
 
