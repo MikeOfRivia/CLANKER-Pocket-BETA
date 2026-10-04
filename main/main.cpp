@@ -610,12 +610,13 @@ void PlayBootTune()
     std::vector<int16_t> phrase(static_cast<size_t>(total_samples), 0);
 
     constexpr float kTwoPi = 2.0f * 3.14159265f;
-    constexpr float kAmplitude = 19000.0f;
-    constexpr float kVibratoDepth = 0.0045f;
-    constexpr float kVibratoHz = 5.1f;
+    constexpr float kAmplitude = 20500.0f;
+    constexpr float kVibratoDepth = 0.0018f;
+    constexpr float kVibratoHz = 5.4f;
 
     float phase = 0.0f;
     int note_index = 0;
+    int note_start_sixteenth = 0;
     int note_end_sixteenth = kPhrase[0].sixteenths;
 
     for (int i = 0; i < total_samples; ++i) {
@@ -626,39 +627,56 @@ void PlayBootTune()
 
         while (note_index + 1 < static_cast<int>(std::size(kPhrase)) &&
                elapsed_sixteenth >= note_end_sixteenth) {
+            note_start_sixteenth = note_end_sixteenth;
             ++note_index;
             note_end_sixteenth += kPhrase[note_index].sixteenths;
         }
 
         const float t = static_cast<float>(i) / kAudioSampleRate;
+        const float note_ms =
+            elapsed_ms - static_cast<float>(note_start_sixteenth * kSixteenthMs);
+
+        // Trumpet-like attacks tend to enter a hair below pitch and lock in
+        // quickly. Keep it subtle enough that the written melody stays exact.
+        const float scoop =
+            -0.010f * std::max(0.0f, 1.0f - note_ms / 45.0f);
         const float vibrato =
             1.0f + kVibratoDepth * std::sin(kTwoPi * kVibratoHz * t);
-        phase += kTwoPi * kPhrase[note_index].hz * vibrato / kAudioSampleRate;
+        phase += kTwoPi * kPhrase[note_index].hz * (1.0f + scoop) * vibrato /
+                 kAudioSampleRate;
         if (phase > kTwoPi) phase -= kTwoPi;
 
-        // Keep the phrase genuinely legato: one continuous breath/envelope
-        // across all notes, with only the written pitch changes.
-        const float attack_samples = kAudioSampleRate * 0.060f;
-        const float release_samples = kAudioSampleRate * 0.180f;
-        const float attack =
-            std::min(1.0f, static_cast<float>(i) / attack_samples);
-        const float release =
+        // Keep the scored slur intact, but give each pitch change a small
+        // brass-style articulation and brightness bloom instead of flute air.
+        const float phrase_attack =
+            std::min(1.0f, static_cast<float>(i) /
+                               static_cast<float>(kAudioSampleRate * 0.025f));
+        const float phrase_release =
             std::min(1.0f,
-                     static_cast<float>(total_samples - i - 1) / release_samples);
-        const float envelope = std::min(attack, release);
+                     static_cast<float>(total_samples - i - 1) /
+                         static_cast<float>(kAudioSampleRate * 0.140f));
+        const float note_attack =
+            0.78f + 0.22f * std::min(1.0f, note_ms / 28.0f);
+        const float envelope =
+            std::min(phrase_attack, phrase_release) * note_attack;
 
-        const float fundamental = std::sin(phase);
-        const float harmonic2 = 0.09f * std::sin(phase * 2.0f);
-        const float harmonic3 = 0.02f * std::sin(phase * 3.0f);
-        const float sample =
-            (fundamental + harmonic2 + harmonic3) * envelope * kAmplitude;
+        // A trumpet is harmonically much richer than a flute. This truncated
+        // brass spectrum stays below Nyquist at the phrase's highest note and
+        // survives the Pocket's tiny speaker far better than a near-sine wave.
+        const float brass =
+            1.00f * std::sin(phase) +
+            0.52f * std::sin(phase * 2.0f) +
+            0.30f * std::sin(phase * 3.0f) +
+            0.17f * std::sin(phase * 4.0f) +
+            0.09f * std::sin(phase * 5.0f);
+        const float sample = (brass / 2.08f) * envelope * kAmplitude;
 
         phrase[static_cast<size_t>(i)] =
             static_cast<int16_t>(std::clamp(sample, -32760.0f, 32760.0f));
     }
 
-    // Bring the amp up silently, then play the whole phrase as one continuous
-    // buffer so note boundaries do not turn into little speaker clicks.
+    // Bring the amp up silently, then play the whole brass phrase as one
+    // continuous buffer so note boundaries do not turn into speaker clicks.
     s_codec->SetOutputVolume(90);
     s_codec->SetOutputMuted(true);
     s_codec->EnableOutput(true);
