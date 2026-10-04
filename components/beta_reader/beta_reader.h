@@ -23,6 +23,15 @@ struct PageImage {
     std::vector<uint8_t> bitmap;
 };
 
+struct PageItem {
+    bool image = false;
+    // Text for a text row, or the EPUB-internal image path for an image block.
+    std::string content;
+    int image_width = 0;
+    int image_height = 0;
+    int line_units = 1;
+};
+
 esp_err_t Init();
 bool Ready();
 esp_err_t LastError();
@@ -41,7 +50,8 @@ int PageCount();
 int CurrentPage();
 void SetPage(int page);
 std::vector<std::string> CurrentPageLines();
-const PageImage* CurrentPageImage();
+std::vector<PageItem> CurrentPageItems();
+const PageImage* LoadPageImage(const std::string& image_path);
 
 }  // namespace beta_reader
 
