@@ -263,6 +263,21 @@ void DrawReaderText(uint8_t* fb, int x, int y, const std::string& text)
     }
 }
 
+void DrawReaderImage(uint8_t* fb, int x, int y,
+                     const beta_reader::PageImage& image)
+{
+    if (image.width <= 0 || image.height <= 0 || image.bitmap.empty()) return;
+
+    for (int row = 0; row < image.height; ++row) {
+        for (int col = 0; col < image.width; ++col) {
+            const size_t bit =
+                static_cast<size_t>(row) * image.width + col;
+            if ((image.bitmap[bit >> 3] & (0x80u >> (bit & 7))) == 0) continue;
+            Pixel(fb, x + col, y + row, true);
+        }
+    }
+}
+
 #pragma pack(push, 1)
 struct Cpr1Header {
     char magic[4];
@@ -1316,15 +1331,39 @@ void DrawReadBody(uint8_t* fb)
     s_reader_page = beta_reader::CurrentPage();
 
     // Keep the reading surface clean: no repeating book title or divider.
-    // The persistent top bar still provides device context, while the extra
-    // vertical room is used for two additional lines of book text.
-    const auto lines = beta_reader::CurrentPageLines();
+    // Text and EPUB illustrations share the same flow; images consume a whole
+    // number of reader line slots so pagination and rendering stay identical.
+    const auto items = beta_reader::CurrentPageItems();
     int y = 112;
-    for (size_t i = 0;
-         i < lines.size() && i < static_cast<size_t>(beta_reader::kReaderLinesPerPage);
-         ++i) {
-        DrawReaderText(fb, 28, y, lines[i]);
-        y += beta_reader::kReaderLineHeightPx;
+    int used_units = 0;
+    for (const auto& item : items) {
+        if (used_units >= beta_reader::kReaderLinesPerPage) break;
+
+        if (!item.image) {
+            DrawReaderText(fb, 28, y, item.content);
+            y += beta_reader::kReaderLineHeightPx;
+            ++used_units;
+            continue;
+        }
+
+        const int units = std::clamp(
+            item.line_units, 1,
+            beta_reader::kReaderLinesPerPage - used_units);
+        const int slot_height = units * beta_reader::kReaderLineHeightPx;
+
+        const beta_reader::PageImage* image =
+            beta_reader::LoadPageImage(item.content);
+        if (image && image->width > 0 && image->height > 0) {
+            const int image_x = (kPortraitWidth - image->width) / 2;
+            const int image_y =
+                y + std::max(0, (slot_height - image->height) / 2);
+            DrawReaderImage(fb, image_x, image_y, *image);
+        } else {
+            DrawReaderText(fb, 28, y, "[Image unavailable]");
+        }
+
+        y += slot_height;
+        used_units += units;
     }
 
     char page[48] = {};
