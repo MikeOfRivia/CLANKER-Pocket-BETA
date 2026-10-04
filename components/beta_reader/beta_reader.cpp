@@ -303,7 +303,27 @@ std::string NormalizeUtf8Punctuation(const std::string& input)
     return out;
 }
 
-std::string StripHtml(const std::string& html)
+void AppendImageMarker(std::string* out, const std::string& chapter_path,
+                       const std::string& src)
+{
+    if (!out || src.empty()) return;
+
+    const std::string path = JoinZipPath(DirName(chapter_path), src);
+    const std::string low = Lower(path);
+    if (!(EndsWith(low, ".png") || EndsWith(low, ".jpg") ||
+          EndsWith(low, ".jpeg"))) {
+        return;
+    }
+
+    if (!out->empty() && out->back() != '\n') out->push_back('\n');
+    out->push_back(kImageMarkerStart);
+    out->append(kImageMarkerLabel);
+    out->append(path);
+    out->push_back(kImageMarkerEnd);
+    out->push_back('\n');
+}
+
+std::string StripHtml(const std::string& html, const std::string& chapter_path)
 {
     std::string out;
     out.reserve(html.size());
@@ -323,6 +343,18 @@ std::string StripHtml(const std::string& html)
         if (in_tag) {
             if (ch == '>') {
                 const std::string low = Lower(tag);
+
+                if (low.rfind("img", 0) == 0) {
+                    AppendImageMarker(&out, chapter_path,
+                                      XmlAttrInsensitive(tag, "src"));
+                } else if (low.rfind("image", 0) == 0) {
+                    std::string href = XmlAttrInsensitive(tag, "href");
+                    if (href.empty()) {
+                        href = XmlAttrInsensitive(tag, "xlink:href");
+                    }
+                    AppendImageMarker(&out, chapter_path, href);
+                }
+
                 if (low.rfind("br", 0) == 0 || low.rfind("/p", 0) == 0 ||
                     low.rfind("/div", 0) == 0 || low.rfind("/li", 0) == 0 ||
                     low.rfind("/h1", 0) == 0 || low.rfind("/h2", 0) == 0 ||
@@ -338,10 +370,11 @@ std::string StripHtml(const std::string& html)
         }
 
         if (ch == '&') {
-            const size_t end = html.find(';', i + 1);
-            if (end != std::string::npos && end - i <= 12) {
-                AppendEntityDecoded(&out, html.substr(i + 1, end - i - 1));
-                i = end + 1;
+            const size_t entity_end = html.find(';', i + 1);
+            if (entity_end != std::string::npos && entity_end - i <= 12) {
+                AppendEntityDecoded(
+                    &out, html.substr(i + 1, entity_end - i - 1));
+                i = entity_end + 1;
                 continue;
             }
         }
@@ -385,6 +418,42 @@ std::string StripHtml(const std::string& html)
     }
     return clean;
 }
+
+bool StartsChapterSection(const std::string& text)
+{
+    size_t pos = 0;
+    int lines_checked = 0;
+
+    while (pos < text.size() && lines_checked < 5) {
+        const size_t end = text.find('\n', pos);
+        const size_t line_end = end == std::string::npos ? text.size() : end;
+        std::string line = text.substr(pos, line_end - pos);
+
+        while (!line.empty() &&
+               std::isspace(static_cast<unsigned char>(line.front()))) {
+            line.erase(line.begin());
+        }
+        while (!line.empty() &&
+               std::isspace(static_cast<unsigned char>(line.back()))) {
+            line.pop_back();
+        }
+
+        if (!line.empty() && line.front() != kImageMarkerStart) {
+            ++lines_checked;
+            const std::string low = Lower(line);
+            if (low == "chapter" || low.rfind("chapter ", 0) == 0 ||
+                low == "prologue" || low == "epilogue" ||
+                low.rfind("part ", 0) == 0 || low.rfind("book ", 0) == 0) {
+                return true;
+            }
+        }
+
+        if (end == std::string::npos) break;
+        pos = end + 1;
+    }
+    return false;
+}
+
 
 bool ReadTxt(const std::string& path, std::string* out)
 {
@@ -572,13 +641,25 @@ bool ReadEpub(const std::string& path, std::string* out)
                  static_cast<unsigned>(chapter.size()));
         LogMemory("after chapter extract");
 
-        chapter = StripHtml(chapter);
+        chapter = StripHtml(chapter, chapter_path);
         ESP_LOGI(kTag, "EPUB chapter cleaned bytes: %u",
                  static_cast<unsigned>(chapter.size()));
         LogMemory("after chapter clean");
 
         if (!chapter.empty()) {
-            if (!out->empty() && out->back() != '\n') out->push_back('\n');
+            if (!out->empty() && StartsChapterSection(chapter)) {
+                while (!out->empty() &&
+                       (out->back() == '\n' || out->back() == '\r' ||
+                        out->back() == ' ')) {
+                    out->pop_back();
+                }
+                out->push_back(kPageBreakMarker);
+                ESP_LOGI(kTag, "Page break before chapter-like section: %s",
+                         chapter_path.c_str());
+            } else if (!out->empty() && out->back() != '\n') {
+                out->push_back('\n');
+            }
+
             out->append(chapter);
             out->append("\n\n");
         }
