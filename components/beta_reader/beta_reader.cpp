@@ -12,8 +12,11 @@
 #include <vector>
 
 #include "driver/sdmmc_host.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "full_miniz.h"
 #include "sdmmc_cmd.h"
 
@@ -51,6 +54,46 @@ std::string Lower(std::string s)
         return static_cast<char>(std::tolower(c));
     });
     return s;
+}
+
+std::string NormalizeBookKey(const std::string& name)
+{
+    std::string key;
+    key.reserve(name.size());
+
+    bool pending_space = false;
+    for (unsigned char ch : name) {
+        if (std::isspace(ch)) {
+            pending_space = !key.empty();
+            continue;
+        }
+
+        if (pending_space) {
+            key.push_back(' ');
+            pending_space = false;
+        }
+        key.push_back(static_cast<char>(std::tolower(ch)));
+    }
+
+    return key;
+}
+
+void LogMemory(const char* stage)
+{
+    const size_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    const size_t internal_largest =
+        heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    const size_t psram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    const size_t psram_largest =
+        heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+
+    ESP_LOGI(kTag,
+             "MEM %s internal=%u largest=%u psram=%u largest=%u",
+             stage ? stage : "?",
+             static_cast<unsigned>(internal_free),
+             static_cast<unsigned>(internal_largest),
+             static_cast<unsigned>(psram_free),
+             static_cast<unsigned>(psram_largest));
 }
 
 bool EndsWith(const std::string& value, const std::string& suffix)
@@ -275,13 +318,20 @@ bool ReadTxt(const std::string& path, std::string* out)
 
 bool ReadEpub(const std::string& path, std::string* out)
 {
+    ESP_LOGI(kTag, "EPUB open begin: %s", path.c_str());
+    LogMemory("before zip open");
+
     mz_zip_archive zip = {};
     if (!mz_zip_reader_init_file(&zip, path.c_str(), 0)) {
         ESP_LOGW(kTag, "Unable to open EPUB zip: %s", path.c_str());
         return false;
     }
 
+    ESP_LOGI(kTag, "EPUB zip open OK");
+    LogMemory("after zip open");
+
     std::string container;
+    ESP_LOGI(kTag, "EPUB extracting container.xml");
     if (!ZipExtractText(&zip, "META-INF/container.xml", &container)) {
         mz_zip_reader_end(&zip);
         ESP_LOGW(kTag, "EPUB missing META-INF/container.xml");
@@ -302,7 +352,10 @@ bool ReadEpub(const std::string& path, std::string* out)
         return false;
     }
 
+    ESP_LOGI(kTag, "EPUB package path: %s", opf_path.c_str());
+
     std::string opf;
+    ESP_LOGI(kTag, "EPUB extracting package");
     if (!ZipExtractText(&zip, opf_path, &opf)) {
         mz_zip_reader_end(&zip);
         ESP_LOGW(kTag, "Could not extract EPUB package: %s", opf_path.c_str());
@@ -352,30 +405,70 @@ bool ReadEpub(const std::string& path, std::string* out)
         }
     }
 
+    ESP_LOGI(kTag, "EPUB spine entries: %u",
+             static_cast<unsigned>(spine.size()));
+    LogMemory("before chapter loop");
+
     out->clear();
     out->reserve(256 * 1024);
-    for (const std::string& chapter_path : spine) {
-        std::string chapter;
-        if (!ZipExtractText(&zip, chapter_path, &chapter)) continue;
-        chapter = StripHtml(chapter);
-        if (chapter.empty()) continue;
+    for (size_t chapter_index = 0; chapter_index < spine.size(); ++chapter_index) {
+        const std::string& chapter_path = spine[chapter_index];
+        ESP_LOGI(kTag, "EPUB chapter %u/%u extract: %s",
+                 static_cast<unsigned>(chapter_index + 1),
+                 static_cast<unsigned>(spine.size()),
+                 chapter_path.c_str());
 
-        if (!out->empty() && out->back() != '\n') out->push_back('\n');
-        out->append(chapter);
-        out->append("\n\n");
+        std::string chapter;
+        if (!ZipExtractText(&zip, chapter_path, &chapter)) {
+            ESP_LOGW(kTag, "EPUB chapter extract failed: %s", chapter_path.c_str());
+            vTaskDelay(pdMS_TO_TICKS(1));
+            continue;
+        }
+
+        ESP_LOGI(kTag, "EPUB chapter compressed->text bytes: %u",
+                 static_cast<unsigned>(chapter.size()));
+        LogMemory("after chapter extract");
+
+        chapter = StripHtml(chapter);
+        ESP_LOGI(kTag, "EPUB chapter cleaned bytes: %u",
+                 static_cast<unsigned>(chapter.size()));
+        LogMemory("after chapter clean");
+
+        if (!chapter.empty()) {
+            if (!out->empty() && out->back() != '\n') out->push_back('\n');
+            out->append(chapter);
+            out->append("\n\n");
+        }
+
+        ESP_LOGI(kTag, "EPUB accumulated bytes: %u",
+                 static_cast<unsigned>(out->size()));
+        LogMemory("after chapter append");
 
         if (out->size() > kMaxBookTextBytes) {
+            ESP_LOGW(kTag, "EPUB text hit %u byte cap; truncating",
+                     static_cast<unsigned>(kMaxBookTextBytes));
             out->resize(kMaxBookTextBytes);
             break;
         }
+
+        // Give the system a scheduling point between potentially expensive
+        // decompression/HTML-cleanup passes.
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 
     mz_zip_reader_end(&zip);
+    ESP_LOGI(kTag, "EPUB read complete: %u text bytes",
+             static_cast<unsigned>(out->size()));
+    LogMemory("after epub read");
     return !out->empty();
 }
 
 void BuildPageIndex()
 {
+    ESP_LOGI(kTag, "Pagination begin: %u text bytes",
+             static_cast<unsigned>(s_book_text.size()));
+    LogMemory("before pagination");
+
     s_page_offsets.clear();
     s_page_offsets.push_back(0);
 
@@ -401,6 +494,10 @@ void BuildPageIndex()
             col = 0;
         }
     }
+
+    ESP_LOGI(kTag, "Pagination complete: %u pages",
+             static_cast<unsigned>(s_page_offsets.size()));
+    LogMemory("after pagination");
 }
 
 std::vector<std::string> PageLines(size_t start, size_t end)
@@ -522,12 +619,23 @@ bool RefreshLibrary()
                         stat_ok ? static_cast<uint32_t>(st.st_size) : 0;
 
                     const std::string normalized_path = Lower(book.path);
-                    const bool duplicate = std::any_of(
+                    const std::string normalized_name = NormalizeBookKey(book.name);
+                    const auto duplicate = std::find_if(
                         s_books.begin(), s_books.end(),
                         [&](const Book& existing) {
-                            return Lower(existing.path) == normalized_path;
+                            return Lower(existing.path) == normalized_path ||
+                                   NormalizeBookKey(existing.name) == normalized_name;
                         });
-                    if (!duplicate) s_books.push_back(book);
+
+                    if (duplicate == s_books.end()) {
+                        s_books.push_back(book);
+                    } else {
+                        ESP_LOGI(kTag,
+                                 "Skipping duplicate library title '%s': %s (kept %s)",
+                                 book.name.c_str(),
+                                 book.path.c_str(),
+                                 duplicate->path.c_str());
+                    }
                     continue;
                 }
 
@@ -585,13 +693,26 @@ bool OpenPath(const std::string& path)
 {
     if (!s_ready || path.empty()) return false;
 
+    ESP_LOGI(kTag, "OpenPath begin: %s", path.c_str());
+    LogMemory("open begin");
+
     struct stat st = {};
-    if (stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) return false;
+    if (stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
+        ESP_LOGW(kTag, "OpenPath stat failed or not a regular file: %s", path.c_str());
+        return false;
+    }
+
+    ESP_LOGI(kTag, "OpenPath file size: %u",
+             static_cast<unsigned>(st.st_size));
 
     std::string text;
     const bool epub = EndsWith(path, ".epub");
     const bool ok = epub ? ReadEpub(path, &text) : ReadTxt(path, &text);
-    if (!ok || text.empty()) return false;
+    if (!ok || text.empty()) {
+        ESP_LOGW(kTag, "OpenPath reader failed: %s", path.c_str());
+        LogMemory("open failed");
+        return false;
+    }
 
     Book book;
     book.path = path;
