@@ -104,13 +104,10 @@ bool s_reader_in_book = false;
 int s_reader_page = 0;
 int s_reader_library_index = 0;
 int s_reader_page_turns = 0;
-bool s_swap_notice = false;
 bool s_settings_open = false;
 bool s_settings_notice = false;
 int s_settings_index = 0;
 
-constexpr int64_t kModeSwapNoticeUs = 1500000;
-constexpr int64_t kModeSwapCommitUs = 3000000;
 constexpr int64_t kSettingsNoticeUs = 1500000;
 constexpr int64_t kSettingsCommitUs = 3000000;
 constexpr int64_t kBootPttGraceUs = 250000;
@@ -1251,31 +1248,28 @@ void DrawSettingsNotice(uint8_t* fb)
 void DrawMenuOverlay(uint8_t* fb)
 {
     if (s_ui_menu == UiMenu::kNone) return;
-    FillRect(fb, 55, 260, 370, 250, false);
-    DrawOutlineRect(fb, 55, 260, 370, 250, 3);
+    FillRect(fb, 45, 245, 390, 315, false);
+    DrawOutlineRect(fb, 45, 245, 390, 315, 3);
 
     if (s_ui_menu == UiMenu::kChat) {
-        DrawText(fb, 95, 292, "CHAT MENU", 3);
-        DrawText(fb, 86, 360, s_menu_index == 0 ? "> NEW CHAT" : "  NEW CHAT", 3);
-        DrawText(fb, 86, 420, s_menu_index == 1 ? "> CANCEL" : "  CANCEL", 3);
+        DrawText(fb, 95, 278, "CHAT MENU", 3);
+        DrawText(fb, 72, 345, s_menu_index == 0 ? "> NEW CHAT" : "  NEW CHAT", 3);
+        DrawText(fb, 72, 410,
+                 s_menu_index == 1 ? "> SWITCH TO READ" : "  SWITCH TO READ", 2);
+        DrawText(fb, 72, 475, s_menu_index == 2 ? "> CANCEL" : "  CANCEL", 3);
     } else if (s_ui_menu == UiMenu::kClearConfirm) {
         DrawText(fb, 93, 300, "CLEAR CHAT", 3);
         DrawText(fb, 87, 365, "PRESS TO CONFIRM", 2);
         DrawText(fb, 82, 420, "UP DOWN TO CANCEL", 2);
     } else if (s_ui_menu == UiMenu::kReader) {
-        DrawText(fb, 85, 292, "READER MENU", 3);
-        DrawText(fb, 78, 360, s_menu_index == 0 ? "> LIBRARY" : "  LIBRARY", 3);
-        DrawText(fb, 78, 420, s_menu_index == 1 ? "> CANCEL" : "  CANCEL", 3);
+        DrawText(fb, 85, 278, "READER MENU", 3);
+        const char* first = s_reader_in_book ? "LIBRARY" : "OPEN BOOK";
+        std::string first_line = std::string(s_menu_index == 0 ? "> " : "  ") + first;
+        DrawText(fb, 72, 345, first_line.c_str(), 3);
+        DrawText(fb, 72, 410,
+                 s_menu_index == 1 ? "> SWITCH TO CHAT" : "  SWITCH TO CHAT", 2);
+        DrawText(fb, 72, 475, s_menu_index == 2 ? "> CANCEL" : "  CANCEL", 3);
     }
-}
-
-void DrawSwapOverlay(uint8_t* fb)
-{
-    if (!s_swap_notice) return;
-    FillRect(fb, 66, 316, 348, 128, false);
-    DrawOutlineRect(fb, 66, 316, 348, 128, 3);
-    DrawText(fb, 91, 345, "SWAPPING MODE", 3);
-    DrawText(fb, 118, 398, "KEEP HOLDING", 2);
 }
 
 void RenderUi()
@@ -1289,7 +1283,6 @@ void RenderUi()
         if (s_ui_mode == UiMode::kChat) DrawChatBody(fb);
         else DrawReadBody(fb);
         DrawMenuOverlay(fb);
-        DrawSwapOverlay(fb);
         DrawSettingsNotice(fb);
     }
 }
@@ -1308,7 +1301,6 @@ void ToggleMode()
     s_ui_mode = s_ui_mode == UiMode::kChat ? UiMode::kRead : UiMode::kChat;
     s_ui_menu = UiMenu::kNone;
     s_menu_index = 0;
-    s_swap_notice = false;
     SaveUiState();
     RenderUi();
     (void)s_panel->RefreshFastBase();
@@ -1340,7 +1332,8 @@ void HandleDirection(bool up)
     }
 
     if (s_ui_menu == UiMenu::kChat || s_ui_menu == UiMenu::kReader) {
-        s_menu_index = s_menu_index == 0 ? 1 : 0;
+        if (up) s_menu_index = (s_menu_index + 2) % 3;
+        else s_menu_index = (s_menu_index + 1) % 3;
         RenderUi();
         RefreshUiPartial();
         return;
@@ -1424,8 +1417,14 @@ void HandleSelectShort()
             s_ui_menu = UiMenu::kChat;
             s_menu_index = 0;
         } else if (s_ui_menu == UiMenu::kChat) {
-            if (s_menu_index == 0) s_ui_menu = UiMenu::kClearConfirm;
-            else s_ui_menu = UiMenu::kNone;
+            if (s_menu_index == 0) {
+                s_ui_menu = UiMenu::kClearConfirm;
+            } else if (s_menu_index == 1) {
+                ToggleMode();
+                return;
+            } else {
+                s_ui_menu = UiMenu::kNone;
+            }
         } else if (s_ui_menu == UiMenu::kClearConfirm) {
             ClearChat();
             s_ui_menu = UiMenu::kNone;
@@ -1435,44 +1434,53 @@ void HandleSelectShort()
         return;
     }
 
-    if (!s_reader_in_book) {
-        const auto& books = beta_reader::Books();
-        if (!books.empty()) {
-            const int idx = std::clamp(
-                s_reader_library_index, 0, static_cast<int>(books.size()) - 1);
-            const std::string selected_path = books[static_cast<size_t>(idx)].path;
-            if (!beta_reader::HasOpenBook() ||
-                beta_reader::CurrentPath() != selected_path) {
-                RenderReaderOpening(books[static_cast<size_t>(idx)].name);
-                (void)s_panel->RefreshFastBase();
-
-                if (beta_reader::OpenBook(static_cast<size_t>(idx))) {
-                    s_reader_page = 0;
-                    beta_reader::SetPage(0);
-                }
-            } else {
-                s_reader_page = beta_reader::CurrentPage();
-            }
-            s_reader_in_book = beta_reader::HasOpenBook();
-            SaveUiState();
-        }
-        RenderUi();
-        (void)s_panel->RefreshFastBase();
-        return;
-    }
-
     if (s_ui_menu == UiMenu::kNone) {
         s_ui_menu = UiMenu::kReader;
         s_menu_index = 0;
-    } else if (s_ui_menu == UiMenu::kReader) {
+        RenderUi();
+        RefreshUiPartial();
+        return;
+    }
+
+    if (s_ui_menu == UiMenu::kReader) {
         if (s_menu_index == 0) {
-            s_reader_in_book = false;
-            s_ui_menu = UiMenu::kNone;
-            SaveUiState();
+            if (s_reader_in_book) {
+                s_reader_in_book = false;
+                s_ui_menu = UiMenu::kNone;
+                SaveUiState();
+            } else {
+                const auto& books = beta_reader::Books();
+                if (!books.empty()) {
+                    const int idx = std::clamp(
+                        s_reader_library_index, 0, static_cast<int>(books.size()) - 1);
+                    const std::string selected_path =
+                        books[static_cast<size_t>(idx)].path;
+                    s_ui_menu = UiMenu::kNone;
+
+                    if (!beta_reader::HasOpenBook() ||
+                        beta_reader::CurrentPath() != selected_path) {
+                        RenderReaderOpening(books[static_cast<size_t>(idx)].name);
+                        (void)s_panel->RefreshFastBase();
+
+                        if (beta_reader::OpenBook(static_cast<size_t>(idx))) {
+                            s_reader_page = 0;
+                            beta_reader::SetPage(0);
+                        }
+                    } else {
+                        s_reader_page = beta_reader::CurrentPage();
+                    }
+                    s_reader_in_book = beta_reader::HasOpenBook();
+                    SaveUiState();
+                }
+            }
+        } else if (s_menu_index == 1) {
+            ToggleMode();
+            return;
         } else {
             s_ui_menu = UiMenu::kNone;
         }
     }
+
     RenderUi();
     RefreshUiPartial();
 }
@@ -1703,7 +1711,6 @@ extern "C" void app_main(void)
     }
 
     std::array<int, 4> last = {1,1,1,1};
-    int64_t select_down_us = 0;
     int64_t boot_down_us = 0;
     int64_t settings_combo_started_us = 0;
     int64_t up_down_us = 0;
@@ -1743,9 +1750,7 @@ extern "C" void app_main(void)
             boot_consumed = false;
         }
         if (last[2] == 1 && select_now == 0) {
-            select_down_us = esp_timer_get_time();
             select_consumed = false;
-            s_swap_notice = false;
         }
 
         const bool settings_combo =
@@ -1753,7 +1758,6 @@ extern "C" void app_main(void)
         if (settings_combo) {
             if (settings_combo_started_us == 0) {
                 settings_combo_started_us = esp_timer_get_time();
-                s_swap_notice = false;
                 s_settings_notice = false;
             }
             const int64_t combo_us = esp_timer_get_time() - settings_combo_started_us;
@@ -1801,33 +1805,11 @@ extern "C" void app_main(void)
         last[0] = boot_now;
 
         if (!s_recording) {
-            if (select_now == 0 && boot_now == 1 && select_down_us != 0 &&
-                !select_consumed && !s_power_menu && !s_settings_open) {
-                const int64_t held_us = esp_timer_get_time() - select_down_us;
-                if (held_us >= kModeSwapNoticeUs && !s_swap_notice) {
-                    s_swap_notice = true;
-                    RenderUi();
-                    RefreshUiPartial();
-                }
-                if (held_us >= kModeSwapCommitUs) {
-                    select_consumed = true;
-                    ToggleMode();
-                }
-            }
-
             if (last[2] == 0 && select_now == 1) {
                 if (!select_consumed && boot_now == 1) {
-                    if (s_swap_notice) {
-                        s_swap_notice = false;
-                        RenderUi();
-                        RefreshUiPartial();
-                    } else {
-                        HandleSelectShort();
-                    }
+                    HandleSelectShort();
                 }
-                select_down_us = 0;
                 select_consumed = false;
-                s_swap_notice = false;
             }
             last[2] = select_now;
 
