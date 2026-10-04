@@ -1186,7 +1186,7 @@ void DrawReadBody(uint8_t* fb)
     std::snprintf(page, sizeof(page), "PAGE %d OF %d",
                   s_reader_page + 1, beta_reader::PageCount());
     const int footer_width = static_cast<int>(std::strlen(page)) * 6;
-    DrawText(fb, (kPortraitWidth - footer_width) / 2, 744, page, 1);
+    DrawText(fb, (kPortraitWidth - footer_width) / 2, 782, page, 1);
 }
 
 void RenderReaderOpening(const std::string& title)
