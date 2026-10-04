@@ -11,6 +11,7 @@
 #include <string>
 #include <sys/stat.h>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "driver/sdmmc_host.h"
@@ -56,6 +57,7 @@ std::vector<size_t> s_page_offsets;
 int s_page = 0;
 PageImage s_image_cache;
 std::string s_image_cache_path;
+std::unordered_map<std::string, std::pair<int, int>> s_image_dimensions;
 
 std::string Lower(std::string s)
 {
