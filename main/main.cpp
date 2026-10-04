@@ -583,6 +583,62 @@ void PlayUiTick()
     PlayTone(1250.0f, 32, 36, 10000);
 }
 
+void PlayFluteTone(float frequency_hz, int duration_ms, int volume = 38,
+                   int amplitude = 10500)
+{
+    if (!s_codec || s_recording || duration_ms <= 0) return;
+
+    const int samples = std::max(1, (kAudioSampleRate * duration_ms) / 1000);
+    std::vector<int16_t> tone(static_cast<size_t>(samples), 0);
+
+    float phase = 0.0f;
+    constexpr float kTwoPi = 2.0f * 3.14159265f;
+    for (int i = 0; i < samples; ++i) {
+        const float t = static_cast<float>(i) / kAudioSampleRate;
+
+        // Gentle flute-like vibrato and a weak second harmonic. This stays
+        // musical on the Pocket's tiny speaker without sounding like a buzzer.
+        const float vibrato =
+            1.0f + 0.0065f * std::sin(kTwoPi * 5.2f * t);
+        phase += kTwoPi * frequency_hz * vibrato / kAudioSampleRate;
+        if (phase > kTwoPi) phase -= kTwoPi;
+
+        const float fundamental = std::sin(phase);
+        const float harmonic2 = 0.16f * std::sin(phase * 2.0f);
+        const float harmonic3 = 0.035f * std::sin(phase * 3.0f);
+
+        const float attack =
+            std::min(1.0f, static_cast<float>(i) /
+                               static_cast<float>(kAudioSampleRate * 0.045f));
+        const float release =
+            std::min(1.0f, static_cast<float>(samples - i - 1) /
+                               static_cast<float>(kAudioSampleRate * 0.075f));
+        const float envelope = std::min(attack, release);
+
+        const float sample =
+            (fundamental + harmonic2 + harmonic3) * envelope * amplitude;
+        tone[static_cast<size_t>(i)] =
+            static_cast<int16_t>(std::clamp(sample, -32760.0f, 32760.0f));
+    }
+
+    s_codec->SetOutputVolume(volume);
+    s_codec->SetOutputMuted(false);
+    const bool already_enabled = s_codec->output_enabled();
+    if (!already_enabled) {
+        s_codec->EnableOutput(true);
+        vTaskDelay(pdMS_TO_TICKS(80));
+    }
+
+    (void)s_codec->OutputData(tone.data(), tone.size());
+    vTaskDelay(pdMS_TO_TICKS(duration_ms + 18));
+
+    if (!already_enabled) {
+        s_codec->SetOutputMuted(true);
+        vTaskDelay(pdMS_TO_TICKS(20));
+        s_codec->EnableOutput(false);
+    }
+}
+
 void PlayBootTune()
 {
     if (!s_codec) return;
@@ -592,19 +648,32 @@ void PlayBootTune()
     s_codec->EnableOutput(true);
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    // Intentionally cheap little CLANKER startup chirp.
-    PlayTone(523.25f, 90, 38, 10500, true);
-    vTaskDelay(pdMS_TO_TICKS(25));
-    PlayTone(659.25f, 90, 38, 10500, true);
-    vTaskDelay(pdMS_TO_TICKS(25));
-    PlayTone(783.99f, 115, 38, 11000, true);
-    vTaskDelay(pdMS_TO_TICKS(35));
-    PlayTone(392.00f, 70, 34, 9000, true);
-    vTaskDelay(pdMS_TO_TICKS(20));
-    PlayTone(1046.50f, 150, 40, 11500, true);
+    // Original CLANKER Pocket "summoning flute" startup motif: eerie,
+    // pentatonic, and deliberately reminiscent of classic tokusatsu monster
+    // summoning music without reproducing any existing melody.
+    struct BootNote {
+        float hz;
+        int ms;
+        int gap_ms;
+    };
+
+    constexpr BootNote kMotif[] = {
+        {587.33f, 300, 45},   // D5
+        {698.46f, 230, 35},   // F5
+        {880.00f, 360, 70},   // A5
+        {783.99f, 220, 35},   // G5
+        {1046.50f, 340, 55},  // C6
+        {880.00f, 250, 45},   // A5
+        {1174.66f, 520, 0},   // D6
+    };
+
+    for (const auto& note : kMotif) {
+        PlayFluteTone(note.hz, note.ms, 38, 10200);
+        if (note.gap_ms > 0) vTaskDelay(pdMS_TO_TICKS(note.gap_ms));
+    }
 
     s_codec->SetOutputMuted(true);
-    vTaskDelay(pdMS_TO_TICKS(35));
+    vTaskDelay(pdMS_TO_TICKS(40));
     s_codec->EnableOutput(false);
 }
 
