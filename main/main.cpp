@@ -103,7 +103,6 @@ int s_menu_index = 0;
 bool s_reader_in_book = false;
 int s_reader_page = 0;
 int s_reader_library_index = 0;
-int s_reader_page_turns = 0;
 bool s_settings_open = false;
 bool s_settings_notice = false;
 int s_settings_index = 0;
@@ -120,7 +119,6 @@ constexpr int64_t kChatScrollRepeatIntervalUs = 60000;
 constexpr int64_t kUiAudioIdleTimeoutUs = 2000000;
 constexpr int kChatScrollTapStepPx = 28;
 constexpr int kChatScrollHoldStepPx = 116;
-constexpr int kReaderFullRefreshEveryPages = 10;
 constexpr int kChatVisibleMessages = 4;
 
 struct CaptureStats {
@@ -1647,14 +1645,14 @@ void HandleDirection(bool up, bool audible = true)
     else s_reader_page = std::min(max_page, s_reader_page + 1);
     beta_reader::SetPage(s_reader_page);
     s_reader_page = beta_reader::CurrentPage();
-    ++s_reader_page_turns;
     SaveUiState();
     RenderUi();
-    if ((s_reader_page_turns % kReaderFullRefreshEveryPages) == 0) {
-        (void)s_panel->RefreshFullBase();
-    } else {
-        (void)s_panel->RefreshFastBase();
-    }
+
+    // Reader page turns should behave like an e-reader, not a screen-mode change:
+    // use the SSD1677 differential waveform and deliberately defer any full
+    // cleaning flash. Opening a menu/library still uses the normal refresh path,
+    // which can perform the occasional full clean when ghosting budget is spent.
+    (void)s_panel->RefreshChangedRegionNoFlush();
 }
 
 void HandleSelectShort(bool audible = true)
