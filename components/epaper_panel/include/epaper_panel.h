@@ -57,6 +57,9 @@ public:
     // RefreshFullBase, but clears accumulated ghosting less thoroughly.
     esp_err_t RefreshFastBase();
     esp_err_t RefreshChangedRegion();
+    // Differential refresh that never auto-promotes to a full flashing clean.
+    // Intended for reader page turns; a later menu/state refresh can clean ghosting.
+    esp_err_t RefreshChangedRegionNoFlush();
     esp_err_t RefreshPartialFullScreen();
     esp_err_t Sleep();
     void Clear(bool white = true);
@@ -84,6 +87,7 @@ private:
     esp_err_t SetWindow(uint16_t x_start, uint16_t y_start, uint16_t x_end, uint16_t y_end);
     esp_err_t SetCursor(uint16_t x_start, uint16_t y_start);
     esp_err_t RefreshFullBaseInternal(bool fast);
+    esp_err_t RefreshPartialFullScreenInternal(bool allow_full_flush);
     esp_err_t InitFull(bool fast);
     esp_err_t InitPartial();
     esp_err_t DisplayFullBase();
