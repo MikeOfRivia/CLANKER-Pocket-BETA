@@ -1129,16 +1129,16 @@ void DrawBatteryIndicator(uint8_t* fb)
     }
 
     const int x = 414;
-    const int y = 31;
+    const int y = 23;
     const int w = 46;
     const int h = 24;
 
     if (charging) {
         // Compact lightning bolt immediately left of the battery.
-        FillRect(fb, 402, 31, 5, 9, true);
-        FillRect(fb, 398, 39, 9, 5, true);
-        FillRect(fb, 402, 43, 5, 10, true);
-        FillRect(fb, 407, 40, 4, 5, true);
+        FillRect(fb, 402, 23, 5, 9, true);
+        FillRect(fb, 398, 31, 9, 5, true);
+        FillRect(fb, 402, 35, 5, 10, true);
+        FillRect(fb, 407, 32, 4, 5, true);
     }
 
     DrawOutlineRect(fb, x, y, w, h, 2);
@@ -1158,17 +1158,17 @@ void DrawBatteryIndicator(uint8_t* fb)
 
 void DrawTopBar(uint8_t* fb)
 {
-    DrawClankerWordmark(fb, 12, 31);
+    DrawClankerWordmark(fb, 12, 20);
 
     if (s_settings_open) {
-        DrawText(fb, 304, 38, "SETTINGS", 2);
+        DrawText(fb, 304, 30, "SETTINGS", 2);
     } else {
         const char* mode = s_ui_mode == UiMode::kChat ? "< CHAT >" : "< READ >";
-        DrawText(fb, 292, 38, mode, 2);
+        DrawText(fb, 292, 30, mode, 2);
     }
 
     DrawBatteryIndicator(fb);
-    FillRect(fb, 18, 92, kPortraitWidth - 36, 3, true);
+    FillRect(fb, 18, 76, kPortraitWidth - 36, 3, true);
 }
 
 void DrawMicIcon(uint8_t* fb)
@@ -1250,7 +1250,7 @@ int ChatTranscriptHeight()
 
 int ChatMaxScrollPx()
 {
-    constexpr int kBodyTop = 112;
+    constexpr int kBodyTop = 90;
     constexpr int kBodyBottom = 688;
     return std::max(
         0, ChatTranscriptHeight() - (kBodyBottom - kBodyTop));
@@ -1297,7 +1297,7 @@ void DrawChatMessageClipped(uint8_t* fb, int y, const ChatMessage& msg,
 
 void DrawChatBody(uint8_t* fb)
 {
-    constexpr int kBodyTop = 112;
+    constexpr int kBodyTop = 90;
     constexpr int kBodyBottom = 688;
     constexpr int kBodyHeight = kBodyBottom - kBodyTop;
     constexpr int kGap = 10;
@@ -1420,7 +1420,7 @@ void DrawReadBody(uint8_t* fb)
     // Text and EPUB illustrations share the same flow; images consume a whole
     // number of reader line slots so pagination and rendering stay identical.
     const auto items = beta_reader::CurrentPageItems();
-    int y = 112;
+    int y = 90;
     int used_units = 0;
     for (const auto& item : items) {
         if (used_units >= beta_reader::kReaderLinesPerPage) break;
@@ -1456,7 +1456,7 @@ void DrawReadBody(uint8_t* fb)
     std::snprintf(page, sizeof(page), "PAGE %d OF %d",
                   s_reader_page + 1, beta_reader::PageCount());
     const int footer_width = static_cast<int>(std::strlen(page)) * 6;
-    DrawText(fb, (kPortraitWidth - footer_width) / 2, 782, page, 1);
+    DrawText(fb, (kPortraitWidth - footer_width) / 2, 786, page, 1);
 }
 
 void RenderReaderOpening(const std::string& title)
