@@ -247,12 +247,20 @@ esp_err_t EpaperPanel::RefreshFullBaseInternal(bool fast)
 
 esp_err_t EpaperPanel::RefreshPartialFullScreen()
 {
+    return RefreshPartialFullScreenInternal(true);
+}
+
+esp_err_t EpaperPanel::RefreshPartialFullScreenInternal(bool allow_full_flush)
+{
     // A differential update only drives pixels where 0x24 != 0x26, so everything that did
     // not change gets no drive at all and its contrast decays -- the screen goes visibly
-    // lighter across a run of partials. Periodically re-drive every pixel to restore it.
-    // Use the mode-1 full waveform, not the fast one: fast flashes but settles at lower
-    // contrast on this panel, so it cannot be used to restore a faded screen.
-    if (!CanPartialRefresh(kMaxPartialRefreshesBeforeFlush)) {
+    // lighter across a run of partials. Normal UI refreshes may periodically re-drive every
+    // pixel; reader page turns can explicitly defer that cleaning flash until a menu/state
+    // transition by setting allow_full_flush=false.
+    if (RequiresBaseRefresh()) {
+        return RefreshFullBase();
+    }
+    if (allow_full_flush && !CanPartialRefresh(kMaxPartialRefreshesBeforeFlush)) {
         return RefreshFullBase();
     }
     if (framebuffer_ == nullptr || previous_framebuffer_ == nullptr) {
@@ -320,6 +328,18 @@ esp_err_t EpaperPanel::RefreshChangedRegion()
         return ESP_OK;
     }
     return RefreshPartialFullScreen();
+}
+
+esp_err_t EpaperPanel::RefreshChangedRegionNoFlush()
+{
+    if (framebuffer_ == nullptr || previous_framebuffer_ == nullptr) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (memcmp(framebuffer_, previous_framebuffer_,
+               static_cast<size_t>(config_.buffer_len)) == 0) {
+        return ESP_OK;
+    }
+    return RefreshPartialFullScreenInternal(false);
 }
 
 esp_err_t EpaperPanel::Sleep()
