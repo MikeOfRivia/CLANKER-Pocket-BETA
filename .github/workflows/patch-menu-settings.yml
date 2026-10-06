@@ -1,0 +1,86 @@
+name: Apply menu settings update
+
+on:
+  push:
+    branches: [feature/chat-read-ui]
+    paths: [.github/workflows/patch-menu-settings.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/chat-read-ui
+          fetch-depth: 0
+      - name: Patch menu and remove secret settings path
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('main/main.cpp')
+          s = p.read_text()
+
+          def rep(old, new, label):
+              global s
+              count = s.count(old)
+              if count != 1:
+                  raise SystemExit(f'{label}: expected 1 match, found {count}')
+              s = s.replace(old, new, 1)
+
+          rep('''bool s_settings_open = false;\nbool s_settings_notice = false;\nint s_settings_index = 0;''',
+              '''bool s_settings_open = false;\nint s_settings_index = 0;''',
+              'settings notice state')
+
+          rep('''constexpr int64_t kSettingsNoticeUs = 1500000;\nconstexpr int64_t kSettingsCommitUs = 3000000;\nconstexpr int64_t kBootPttGraceUs = 250000;''',
+              '''constexpr int64_t kBootPttGraceUs = 250000;''',
+              'secret settings timing constants')
+
+          rep('''void DrawSettingsNotice(uint8_t* fb)\n{\n    if (!s_settings_notice) return;\n    FillRect(fb, 66, 316, 348, 128, false);\n    DrawOutlineRect(fb, 66, 316, 348, 128, 3);\n    DrawText(fb, 82, 345, "OPENING SETTINGS", 3);\n    DrawText(fb, 118, 398, "KEEP HOLDING", 2);\n}\n\n''',
+              '''''',
+              'settings hold notice function')
+
+          rep('''void DrawMenuOverlay(uint8_t* fb)\n{\n    if (s_ui_menu == UiMenu::kNone) return;\n    FillRect(fb, 45, 245, 390, 315, false);\n    DrawOutlineRect(fb, 45, 245, 390, 315, 3);\n\n    if (s_ui_menu == UiMenu::kChat) {\n        DrawText(fb, 95, 278, "CHAT MENU", 3);\n        DrawText(fb, 72, 345, s_menu_index == 0 ? "> NEW CHAT" : "  NEW CHAT", 3);\n        DrawText(fb, 72, 410,\n                 s_menu_index == 1 ? "> SWITCH TO READ" : "  SWITCH TO READ", 2);\n        DrawText(fb, 72, 475, s_menu_index == 2 ? "> CANCEL" : "  CANCEL", 3);\n    } else if (s_ui_menu == UiMenu::kClearConfirm) {\n        DrawText(fb, 93, 300, "CLEAR CHAT", 3);\n        DrawText(fb, 87, 365, "PRESS TO CONFIRM", 2);\n        DrawText(fb, 82, 420, "UP DOWN TO CANCEL", 2);\n    } else if (s_ui_menu == UiMenu::kReader) {\n        DrawText(fb, 85, 278, "READER MENU", 3);\n        const char* first = s_reader_in_book ? "LIBRARY" : "OPEN BOOK";\n        std::string first_line = std::string(s_menu_index == 0 ? "> " : "  ") + first;\n        DrawText(fb, 72, 345, first_line.c_str(), 3);\n        DrawText(fb, 72, 410,\n                 s_menu_index == 1 ? "> SWITCH TO CHAT" : "  SWITCH TO CHAT", 2);\n        DrawText(fb, 72, 475, s_menu_index == 2 ? "> CANCEL" : "  CANCEL", 3);\n    }\n}\n''',
+              '''void DrawMenuOverlay(uint8_t* fb)\n{\n    if (s_ui_menu == UiMenu::kNone) return;\n    FillRect(fb, 45, 245, 390, 315, false);\n    DrawOutlineRect(fb, 45, 245, 390, 315, 3);\n\n    if (s_ui_menu == UiMenu::kChat) {\n        DrawText(fb, 95, 278, "CHAT MENU", 3);\n        DrawText(fb, 72, 335, s_menu_index == 0 ? "> NEW CHAT" : "  NEW CHAT", 3);\n        DrawText(fb, 72, 390,\n                 s_menu_index == 1 ? "> SWITCH TO READ" : "  SWITCH TO READ", 3);\n        DrawText(fb, 72, 445, s_menu_index == 2 ? "> SETTINGS" : "  SETTINGS", 3);\n        DrawText(fb, 72, 500, s_menu_index == 3 ? "> CANCEL" : "  CANCEL", 3);\n    } else if (s_ui_menu == UiMenu::kClearConfirm) {\n        DrawText(fb, 93, 300, "CLEAR CHAT", 3);\n        DrawText(fb, 87, 365, "PRESS TO CONFIRM", 2);\n        DrawText(fb, 82, 420, "UP DOWN TO CANCEL", 2);\n    } else if (s_ui_menu == UiMenu::kReader) {\n        DrawText(fb, 85, 278, "READER MENU", 3);\n        const char* first = s_reader_in_book ? "LIBRARY" : "OPEN BOOK";\n        std::string first_line = std::string(s_menu_index == 0 ? "> " : "  ") + first;\n        DrawText(fb, 72, 335, first_line.c_str(), 3);\n        DrawText(fb, 72, 390,\n                 s_menu_index == 1 ? "> SWITCH TO CHAT" : "  SWITCH TO CHAT", 3);\n        DrawText(fb, 72, 445, s_menu_index == 2 ? "> SETTINGS" : "  SETTINGS", 3);\n        DrawText(fb, 72, 500, s_menu_index == 3 ? "> CANCEL" : "  CANCEL", 3);\n    }\n}\n''',
+              'menu overlay')
+
+          rep('''        DrawMenuOverlay(fb);\n        DrawSettingsNotice(fb);''',
+              '''        DrawMenuOverlay(fb);''',
+              'settings notice render')
+
+          rep('''    if (s_ui_menu == UiMenu::kChat || s_ui_menu == UiMenu::kReader) {\n        if (up) s_menu_index = (s_menu_index + 2) % 3;\n        else s_menu_index = (s_menu_index + 1) % 3;\n        RenderUi();\n        RefreshUiPartial();\n        return;\n    }''',
+              '''    if (s_ui_menu == UiMenu::kChat || s_ui_menu == UiMenu::kReader) {\n        if (up) s_menu_index = (s_menu_index + 3) % 4;\n        else s_menu_index = (s_menu_index + 1) % 4;\n        RenderUi();\n        RefreshUiPartial();\n        return;\n    }''',
+              'four item menu navigation')
+
+          rep('''        } else if (s_ui_menu == UiMenu::kChat) {\n            if (s_menu_index == 0) {\n                s_ui_menu = UiMenu::kClearConfirm;\n            } else if (s_menu_index == 1) {\n                ToggleMode();\n                return;\n            } else {\n                s_ui_menu = UiMenu::kNone;\n            }\n        } else if (s_ui_menu == UiMenu::kClearConfirm) {''',
+              '''        } else if (s_ui_menu == UiMenu::kChat) {\n            if (s_menu_index == 0) {\n                s_ui_menu = UiMenu::kClearConfirm;\n            } else if (s_menu_index == 1) {\n                ToggleMode();\n                return;\n            } else if (s_menu_index == 2) {\n                s_settings_open = true;\n                s_settings_index = 0;\n                s_ui_menu = UiMenu::kNone;\n            } else {\n                s_ui_menu = UiMenu::kNone;\n            }\n        } else if (s_ui_menu == UiMenu::kClearConfirm) {''',
+              'chat settings menu action')
+
+          rep('''        } else if (s_menu_index == 1) {\n            ToggleMode();\n            return;\n        } else {\n            s_ui_menu = UiMenu::kNone;\n        }\n    }\n\n    RenderUi();''',
+              '''        } else if (s_menu_index == 1) {\n            ToggleMode();\n            return;\n        } else if (s_menu_index == 2) {\n            s_settings_open = true;\n            s_settings_index = 0;\n            s_ui_menu = UiMenu::kNone;\n        } else {\n            s_ui_menu = UiMenu::kNone;\n        }\n    }\n\n    RenderUi();''',
+              'reader settings menu action')
+
+          rep('''    int64_t boot_down_us = 0;\n    int64_t select_down_us = 0;\n    int64_t settings_combo_started_us = 0;\n    int64_t up_down_us = 0;''',
+              '''    int64_t boot_down_us = 0;\n    int64_t select_down_us = 0;\n    int64_t up_down_us = 0;''',
+              'settings combo timer state')
+
+          rep('''    bool select_consumed = false;\n    bool boot_consumed = false;\n    bool settings_combo_consumed = false;''',
+              '''    bool select_consumed = false;\n    bool boot_consumed = false;''',
+              'settings combo consumed state')
+
+          rep('''        const bool settings_combo =\n            boot_now == 0 && select_now == 0 && !s_power_menu && !s_recording;\n\n        if (select_now == 0 && boot_now == 1 && select_down_us != 0 &&\n            !select_consumed &&\n            (esp_timer_get_time() - select_down_us) >= kSelectLongPressIgnoreUs) {\n            select_consumed = true;\n            ESP_LOGI(kTag, "SELECT long press ignored");\n        }\n        if (settings_combo) {\n            if (settings_combo_started_us == 0) {\n                settings_combo_started_us = esp_timer_get_time();\n                s_settings_notice = false;\n            }\n            const int64_t combo_us = esp_timer_get_time() - settings_combo_started_us;\n            if (combo_us >= kSettingsNoticeUs && !s_settings_notice) {\n                s_settings_notice = true;\n                RenderUi();\n                RefreshUiPartial();\n            }\n            if (combo_us >= kSettingsCommitUs && !settings_combo_consumed) {\n                settings_combo_consumed = true;\n                select_consumed = true;\n                boot_consumed = true;\n                s_settings_notice = false;\n                s_settings_open = !s_settings_open;\n                s_ui_menu = UiMenu::kNone;\n                s_settings_index = 0;\n                RenderUi();\n                (void)s_panel->RefreshFastBase();\n            }\n        } else if (settings_combo_started_us != 0) {\n            if (!settings_combo_consumed && s_settings_notice) {\n                s_settings_notice = false;\n                RenderUi();\n                RefreshUiPartial();\n            }\n            settings_combo_started_us = 0;\n            settings_combo_consumed = false;\n        }\n''',
+              '''        if (select_now == 0 && boot_now == 1 && select_down_us != 0 &&\n            !select_consumed &&\n            (esp_timer_get_time() - select_down_us) >= kSelectLongPressIgnoreUs) {\n            select_consumed = true;\n            ESP_LOGI(kTag, "SELECT long press ignored");\n        }\n''',
+              'secret settings combo')
+
+          p.write_text(s)
+          PY
+
+          git config user.name "CLANKER CI"
+          git config user.email "clanker-ci@users.noreply.github.com"
+          git add main/main.cpp
+          git rm .github/workflows/patch-menu-settings.yml
+          git commit -m "Add settings to click menus"
+          git push origin HEAD:feature/chat-read-ui
