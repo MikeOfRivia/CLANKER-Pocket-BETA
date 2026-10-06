@@ -49,6 +49,7 @@ const std::string& CurrentPath();
 int PageCount();
 int CurrentPage();
 void SetPage(int page);
+void Repaginate();
 std::vector<std::string> CurrentPageLines();
 std::vector<PageItem> CurrentPageItems();
 const PageImage* LoadPageImage(const std::string& image_path);
