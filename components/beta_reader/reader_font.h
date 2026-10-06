@@ -16,8 +16,8 @@ struct ReaderGlyph {
 };
 
 // OpenDyslexic Regular rasterized at 20 px as a 1-bit ASCII subset.
-// Reader geometry stays unchanged so existing pagination/layout behavior remains stable.
-constexpr int kReaderFontBaselinePx = 22;
+// Baseline is shifted 1 px for this face; line height/pagination remain unchanged.
+constexpr int kReaderFontBaselinePx = 23;
 constexpr int kReaderLineHeightPx = 29;
 constexpr int kReaderTextWidthPx = 424;
 constexpr int kReaderLinesPerPage = 23;
