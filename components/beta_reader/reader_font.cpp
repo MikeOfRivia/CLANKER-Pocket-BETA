@@ -32,7 +32,7 @@ ReaderGlyph ReaderFontGlyph(char ch)
     unsigned char c = static_cast<unsigned char>(ch);
     if (c < 0x20 || c > 0x7E) c = '?';
 
-    const GFXglyph& glyph = FreeSerif12pt7bGlyphs[c - 0x20];
+    const GFXglyph& glyph = OpenDyslexic20pxGlyphs[c - 0x20];
     return ReaderGlyph{
         glyph.width,
         glyph.height,
@@ -45,7 +45,7 @@ ReaderGlyph ReaderFontGlyph(char ch)
 
 const uint8_t* ReaderFontBitmap(const ReaderGlyph& glyph)
 {
-    return FreeSerif12pt7bBitmaps + glyph.bitmap_offset;
+    return OpenDyslexic20pxBitmaps + glyph.bitmap_offset;
 }
 
 int ReaderFontAdvance(char ch)

@@ -15,8 +15,8 @@ struct ReaderGlyph {
     uint16_t bitmap_offset;
 };
 
-// FreeSerif 12 pt rasterized as a 1-bit ASCII subset. The bitmap is vendored
-// from Adafruit-GFX's generated FreeSerif12pt7b font data.
+// OpenDyslexic Regular rasterized at 20 px as a 1-bit ASCII subset.
+// Reader geometry stays unchanged so existing pagination/layout behavior remains stable.
 constexpr int kReaderFontBaselinePx = 22;
 constexpr int kReaderLineHeightPx = 29;
 constexpr int kReaderTextWidthPx = 424;
