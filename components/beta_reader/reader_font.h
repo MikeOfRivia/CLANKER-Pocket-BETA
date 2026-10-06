@@ -6,6 +6,11 @@
 
 namespace beta_reader {
 
+enum class ReaderFontFace : uint8_t {
+    kOpenDyslexic = 0,
+    kFreeSerif = 1,
+};
+
 struct ReaderGlyph {
     uint8_t width;
     uint8_t height;
@@ -15,12 +20,14 @@ struct ReaderGlyph {
     uint16_t bitmap_offset;
 };
 
-// OpenDyslexic Regular rasterized at 20 px as a 1-bit ASCII subset.
-// Baseline is shifted 1 px for this face; line height/pagination remain unchanged.
-constexpr int kReaderFontBaselinePx = 23;
 constexpr int kReaderLineHeightPx = 29;
 constexpr int kReaderTextWidthPx = 424;
 constexpr int kReaderLinesPerPage = 23;
+
+void SetReaderFontFace(ReaderFontFace face);
+ReaderFontFace GetReaderFontFace();
+const char* ReaderFontName();
+int ReaderFontBaselinePx();
 
 ReaderGlyph ReaderFontGlyph(char ch);
 const uint8_t* ReaderFontBitmap(const ReaderGlyph& glyph);
