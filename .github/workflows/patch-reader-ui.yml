@@ -19,8 +19,9 @@ jobs:
           fetch-depth: 0
 
       - name: Patch UI
-        shell: python
+        shell: bash
         run: |
+          python - <<'PY'
           from pathlib import Path
           p = Path("main/main.cpp")
           s = p.read_text()
@@ -59,6 +60,7 @@ jobs:
           s = s.replace(old_footer, new_footer, 1)
 
           p.write_text(s)
+          PY
 
       - name: Commit changes
         run: |
