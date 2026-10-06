@@ -23,16 +23,60 @@ struct GFXfont {
 #define PROGMEM
 #endif
 
+// OpenDyslexic generated bitmap data.
 #include "reader_font_data.h"
+// Original FreeSerif bitmap data retained as an alternate face.
+#include "reader_font_freeserif_data.h"
 
 namespace beta_reader {
+namespace {
+
+ReaderFontFace s_reader_font_face = ReaderFontFace::kOpenDyslexic;
+
+const GFXglyph* ActiveGlyphs()
+{
+    return s_reader_font_face == ReaderFontFace::kFreeSerif
+        ? FreeSerif12pt7bGlyphs
+        : OpenDyslexic20pxGlyphs;
+}
+
+const uint8_t* ActiveBitmaps()
+{
+    return s_reader_font_face == ReaderFontFace::kFreeSerif
+        ? FreeSerif12pt7bBitmaps
+        : OpenDyslexic20pxBitmaps;
+}
+
+}  // namespace
+
+void SetReaderFontFace(ReaderFontFace face)
+{
+    s_reader_font_face = face;
+}
+
+ReaderFontFace GetReaderFontFace()
+{
+    return s_reader_font_face;
+}
+
+const char* ReaderFontName()
+{
+    return s_reader_font_face == ReaderFontFace::kFreeSerif
+        ? "FREE SERIF"
+        : "OPEN DYSLEXIC";
+}
+
+int ReaderFontBaselinePx()
+{
+    return s_reader_font_face == ReaderFontFace::kFreeSerif ? 22 : 23;
+}
 
 ReaderGlyph ReaderFontGlyph(char ch)
 {
     unsigned char c = static_cast<unsigned char>(ch);
     if (c < 0x20 || c > 0x7E) c = '?';
 
-    const GFXglyph& glyph = OpenDyslexic20pxGlyphs[c - 0x20];
+    const GFXglyph& glyph = ActiveGlyphs()[c - 0x20];
     return ReaderGlyph{
         glyph.width,
         glyph.height,
@@ -45,7 +89,7 @@ ReaderGlyph ReaderFontGlyph(char ch)
 
 const uint8_t* ReaderFontBitmap(const ReaderGlyph& glyph)
 {
-    return OpenDyslexic20pxBitmaps + glyph.bitmap_offset;
+    return ActiveBitmaps() + glyph.bitmap_offset;
 }
 
 int ReaderFontAdvance(char ch)
