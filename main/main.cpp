@@ -88,9 +88,8 @@ enum class UiMode : uint8_t { kChat = 0, kRead = 1 };
 enum class MicState : uint8_t { kIdle, kRecording, kProcessing };
 enum class UiMenu : uint8_t { kNone, kChat, kClearConfirm, kReader };
 enum class SettingsItem : uint8_t {
-    kTextFont = 0,
+    kFontToggle = 0,
     kNetworkSetup,
-    kCleanDisplay,
     kTestConnection,
     kBack,
     kCount,
@@ -1541,22 +1540,15 @@ void DrawSettingsBody(uint8_t* fb)
         if (value) DrawText(fb, 270, y, value, 2);
     };
 
-    const int row0 = options_top + 45;
-    constexpr int kRowGap = 43;
-    row(static_cast<int>(SettingsItem::kTextFont), row0,
-        "TEXT FONT", beta_reader::ReaderFontName());
+    const int row0 = options_top + 52;
+    constexpr int kRowGap = 58;
+    row(static_cast<int>(SettingsItem::kFontToggle), row0,
+        "FONT TOGGLE", beta_reader::ReaderFontName());
     row(static_cast<int>(SettingsItem::kNetworkSetup), row0 + kRowGap,
-        "WIFI / API SETUP");
-    row(static_cast<int>(SettingsItem::kCleanDisplay), row0 + 2 * kRowGap,
-        "CLEAN DISPLAY");
-    row(static_cast<int>(SettingsItem::kTestConnection), row0 + 3 * kRowGap,
+        "TURN ON AP FOR WIFI/AI SETUP");
+    row(static_cast<int>(SettingsItem::kTestConnection), row0 + 2 * kRowGap,
         "TEST CONNECTION");
-    row(static_cast<int>(SettingsItem::kBack), row0 + 4 * kRowGap, "BACK");
-
-    const int help_y = row0 + 4 * kRowGap + 42;
-    DrawDivider(fb, help_y - 12);
-    DrawText(fb, 28, help_y + 12, "UP DOWN TO MOVE", 2);
-    DrawText(fb, 28, help_y + 47, "SELECT TO CHANGE", 2);
+    row(static_cast<int>(SettingsItem::kBack), row0 + 3 * kRowGap, "BACK");
 }
 
 void DrawMenuOverlay(uint8_t* fb)
@@ -1710,7 +1702,7 @@ void HandleSelectShort(bool audible = true)
         const SettingsItem item =
             static_cast<SettingsItem>(s_settings_index);
 
-        if (item == SettingsItem::kTextFont) {
+        if (item == SettingsItem::kFontToggle) {
             const beta_reader::ReaderFontFace next =
                 beta_reader::GetReaderFontFace() ==
                         beta_reader::ReaderFontFace::kOpenDyslexic
@@ -1733,9 +1725,6 @@ void HandleSelectShort(bool audible = true)
             }
             RenderUi();
             (void)s_panel->RefreshFastBase();
-        } else if (item == SettingsItem::kCleanDisplay) {
-            RenderUi();
-            (void)s_panel->RefreshFullBase();
         } else if (item == SettingsItem::kTestConnection) {
             beta_network::RunHttpsProbe();
             RenderUi();
