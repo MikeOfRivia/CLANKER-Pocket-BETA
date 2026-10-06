@@ -1377,6 +1377,34 @@ void SetPage(int page)
     s_page = std::clamp(page, 0, static_cast<int>(s_page_offsets.size()) - 1);
 }
 
+void Repaginate()
+{
+    if (s_book_text.empty()) return;
+
+    size_t anchor = 0;
+    if (!s_page_offsets.empty()) {
+        const int current =
+            std::clamp(s_page, 0, static_cast<int>(s_page_offsets.size()) - 1);
+        anchor = s_page_offsets[static_cast<size_t>(current)];
+    }
+
+    BuildPageIndex();
+    if (s_page_offsets.empty()) {
+        s_page = 0;
+        return;
+    }
+
+    const auto it =
+        std::upper_bound(s_page_offsets.begin(), s_page_offsets.end(), anchor);
+    if (it == s_page_offsets.begin()) {
+        s_page = 0;
+    } else {
+        s_page = static_cast<int>(
+            std::distance(s_page_offsets.begin(), it) - 1);
+    }
+    s_page = std::clamp(s_page, 0, static_cast<int>(s_page_offsets.size()) - 1);
+}
+
 std::vector<std::string> CurrentPageLines()
 {
     if (!HasOpenBook()) return {};
