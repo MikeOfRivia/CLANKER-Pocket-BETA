@@ -1513,9 +1513,10 @@ void DrawSettingsBody(uint8_t* fb)
             (net.ap_enabled ? "ON" : "OFF"));
     row(static_cast<int>(SettingsItem::kFont), 280,
         std::string("FONT: ") + beta_reader::ReaderFontName());
+    row(static_cast<int>(SettingsItem::kBack), 335, "BACK");
 
-    DrawDivider(fb, 335);
-    DrawText(fb, 28, 365, "STATUS", 3);
+    DrawDivider(fb, 390);
+    DrawText(fb, 28, 420, "STATUS", 3);
 
     char battery[32] = {};
     if (s_pmic && s_pmic->isBatteryConnect()) {
@@ -1527,7 +1528,7 @@ void DrawSettingsBody(uint8_t* fb)
     }
 
     std::string battery_line = std::string("BATTERY: ") + battery;
-    DrawText(fb, 28, 425, battery_line.c_str(), 2);
+    DrawText(fb, 28, 480, battery_line.c_str(), 2);
 
     std::string wifi_value;
     if (!net.wifi_enabled) {
@@ -1539,14 +1540,12 @@ void DrawSettingsBody(uint8_t* fb)
     }
     const std::string wifi_line =
         ClipDisplayText(std::string("WIFI: ") + wifi_value, 36);
-    DrawText(fb, 28, 475, wifi_line.c_str(), 2);
+    DrawText(fb, 28, 530, wifi_line.c_str(), 2);
 
     const std::string openai_line =
         std::string("OPENAI: ") +
         (beta_transcription::HasApiKey() ? "ENABLED" : "DISABLED");
-    DrawText(fb, 28, 525, openai_line.c_str(), 2);
-
-    row(static_cast<int>(SettingsItem::kBack), 610, "BACK");
+    DrawText(fb, 28, 580, openai_line.c_str(), 2);
 }
 
 void DrawMenuOverlay(uint8_t* fb)
