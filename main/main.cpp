@@ -87,6 +87,16 @@ int64_t s_recording_started_us = 0;
 enum class UiMode : uint8_t { kChat = 0, kRead = 1 };
 enum class MicState : uint8_t { kIdle, kRecording, kProcessing };
 enum class UiMenu : uint8_t { kNone, kChat, kClearConfirm, kReader };
+enum class SettingsItem : uint8_t {
+    kTextFont = 0,
+    kCleanDisplay,
+    kTestConnection,
+    kBack,
+    kCount,
+};
+
+constexpr int kSettingsItemCount =
+    static_cast<int>(SettingsItem::kCount);
 
 struct ChatMessage {
     bool user = false;
@@ -245,7 +255,7 @@ void DrawText(uint8_t* fb, int x, int y, const char* text, int scale)
 void DrawReaderText(uint8_t* fb, int x, int y, const std::string& text)
 {
     int cursor = x;
-    const int baseline = y + beta_reader::kReaderFontBaselinePx;
+    const int baseline = y + beta_reader::ReaderFontBaselinePx();
 
     for (char ch : text) {
         const beta_reader::ReaderGlyph& glyph = beta_reader::ReaderFontGlyph(ch);
@@ -1047,6 +1057,15 @@ void LoadUiState()
         s_reader_page = std::max(0, static_cast<int>(page));
     }
 
+    uint8_t reader_font = 0;
+    if (nvs_get_u8(handle, "reader_font", &reader_font) == ESP_OK &&
+        reader_font == 1) {
+        beta_reader::SetReaderFontFace(beta_reader::ReaderFontFace::kFreeSerif);
+    } else {
+        beta_reader::SetReaderFontFace(
+            beta_reader::ReaderFontFace::kOpenDyslexic);
+    }
+
     auto load_string = [&](const char* key) -> std::string {
         size_t len = 0;
         if (nvs_get_str(handle, key, nullptr, &len) != ESP_OK || len <= 1) return {};
@@ -1081,6 +1100,11 @@ void SaveUiState()
     nvs_set_u8(handle, "mode", s_ui_mode == UiMode::kRead ? 1 : 0);
     nvs_set_i32(handle, "chat_scroll_px", s_chat_scroll_px);
     nvs_set_i32(handle, "reader_page", s_reader_page);
+    nvs_set_u8(handle, "reader_font",
+               beta_reader::GetReaderFontFace() ==
+                       beta_reader::ReaderFontFace::kFreeSerif
+                   ? 1
+                   : 0);
     nvs_set_u8(handle, "reader_open", s_reader_in_book ? 1 : 0);
     nvs_set_str(handle, "reader_book",
                 beta_reader::HasOpenBook() ? beta_reader::CurrentPath().c_str() : "");
@@ -1479,11 +1503,12 @@ void DrawSettingsBody(uint8_t* fb)
         net.mode == beta_network::Mode::kConnected ? "ONLINE" :
         net.mode == beta_network::Mode::kProvisioning ? "SETUP" : "OFFLINE";
 
-    DrawText(fb, 28, 128, "SYSTEM", 3);
-    DrawText(fb, 28, 185, "WIFI", 2);
-    DrawText(fb, 190, 185, wifi, 2);
-    DrawText(fb, 28, 225, "OPENAI", 2);
-    DrawText(fb, 190, 225, beta_transcription::HasApiKey() ? "READY" : "MISSING", 2);
+    DrawText(fb, 28, 122, "STATUS", 3);
+    DrawText(fb, 28, 172, "WIFI", 2);
+    DrawText(fb, 190, 172, wifi, 2);
+    DrawText(fb, 28, 212, "OPENAI", 2);
+    DrawText(fb, 190, 212,
+             beta_transcription::HasApiKey() ? "READY" : "MISSING", 2);
 
     char battery[32] = {};
     if (s_pmic && s_pmic->isBatteryConnect()) {
@@ -1493,17 +1518,30 @@ void DrawSettingsBody(uint8_t* fb)
     } else {
         std::snprintf(battery, sizeof(battery), "NO PACK");
     }
-    DrawText(fb, 28, 265, "BATTERY", 2);
-    DrawText(fb, 190, 265, battery, 2);
+    DrawText(fb, 28, 252, "BATTERY", 2);
+    DrawText(fb, 190, 252, battery, 2);
 
-    DrawDivider(fb, 320);
-    DrawText(fb, 28, 360, s_settings_index == 0 ? "> TEST HTTPS" : "  TEST HTTPS", 2);
-    DrawText(fb, 28, 415, s_settings_index == 1 ? "> CLEAN DISPLAY" : "  CLEAN DISPLAY", 2);
-    DrawText(fb, 28, 470, s_settings_index == 2 ? "> BACK" : "  BACK", 2);
+    DrawDivider(fb, 300);
+    DrawText(fb, 28, 332, "OPTIONS", 3);
 
-    DrawDivider(fb, 545);
-    DrawText(fb, 28, 585, "UP DOWN SELECT", 2);
-    DrawText(fb, 28, 625, "PRESS RADIAL TO OPEN", 2);
+    auto row = [&](int index, int y, const char* label,
+                   const char* value = nullptr) {
+        std::string line = s_settings_index == index ? "> " : "  ";
+        line += label;
+        DrawText(fb, 28, y, line.c_str(), 2);
+        if (value) DrawText(fb, 270, y, value, 2);
+    };
+
+    row(static_cast<int>(SettingsItem::kTextFont), 382,
+        "TEXT FONT", beta_reader::ReaderFontName());
+    row(static_cast<int>(SettingsItem::kCleanDisplay), 432, "CLEAN DISPLAY");
+    row(static_cast<int>(SettingsItem::kTestConnection), 482,
+        "TEST CONNECTION");
+    row(static_cast<int>(SettingsItem::kBack), 532, "BACK");
+
+    DrawDivider(fb, 590);
+    DrawText(fb, 28, 625, "UP DOWN TO MOVE", 2);
+    DrawText(fb, 28, 665, "SELECT TO CHANGE", 2);
 }
 
 void DrawMenuOverlay(uint8_t* fb)
@@ -1569,8 +1607,14 @@ void ToggleMode()
 void HandleDirection(bool up, bool audible = true)
 {
     if (s_settings_open) {
-        if (up) s_settings_index = (s_settings_index + 2) % 3;
-        else s_settings_index = (s_settings_index + 1) % 3;
+        if (up) {
+            s_settings_index =
+                (s_settings_index + kSettingsItemCount - 1) %
+                kSettingsItemCount;
+        } else {
+            s_settings_index =
+                (s_settings_index + 1) % kSettingsItemCount;
+        }
         RenderUi();
         RefreshUiPartial();
         return;
@@ -1648,13 +1692,31 @@ void HandleSelectShort(bool audible = true)
 {
     if (audible) PlayUiTick();
     if (s_settings_open) {
-        if (s_settings_index == 0) {
+        const SettingsItem item =
+            static_cast<SettingsItem>(s_settings_index);
+
+        if (item == SettingsItem::kTextFont) {
+            const beta_reader::ReaderFontFace next =
+                beta_reader::GetReaderFontFace() ==
+                        beta_reader::ReaderFontFace::kOpenDyslexic
+                    ? beta_reader::ReaderFontFace::kFreeSerif
+                    : beta_reader::ReaderFontFace::kOpenDyslexic;
+            beta_reader::SetReaderFontFace(next);
+            if (beta_reader::HasOpenBook()) {
+                beta_reader::Repaginate();
+                s_reader_page = beta_reader::CurrentPage();
+            }
+            s_chat_scroll_px = 0;
+            SaveUiState();
+            RenderUi();
+            RefreshUiPartial();
+        } else if (item == SettingsItem::kCleanDisplay) {
+            RenderUi();
+            (void)s_panel->RefreshFullBase();
+        } else if (item == SettingsItem::kTestConnection) {
             beta_network::RunHttpsProbe();
             RenderUi();
             RefreshUiPartial();
-        } else if (s_settings_index == 1) {
-            RenderUi();
-            (void)s_panel->RefreshFullBase();
         } else {
             s_settings_open = false;
             s_settings_index = 0;
