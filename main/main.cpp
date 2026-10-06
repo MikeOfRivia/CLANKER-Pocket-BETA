@@ -149,6 +149,7 @@ constexpr Glyph kFont[] = {
     {'*', {0,21,14,31,14,21,0}}, {'<', {2,4,8,16,8,4,2}},
     {'>', {8,4,2,1,2,4,8}}, {'$', {4,15,20,14,5,30,4}},
     {'0', {14,17,19,21,25,17,14}}, {'1', {4,12,4,4,4,4,14}},
+    {'2', {14,17,1,2,4,8,31}}, {'3', {30,1,1,14,1,1,30}},
     {'4', {2,6,10,18,31,2,2}}, {'5', {31,16,16,30,1,1,30}},
     {'6', {14,16,16,30,17,17,14}}, {'7', {31,1,2,4,8,8,8}},
     {'8', {14,17,17,14,17,17,14}}, {'9', {14,17,17,15,1,1,14}},
@@ -1447,11 +1448,12 @@ void DrawReadBody(uint8_t* fb)
         used_units += units;
     }
 
-    char page[48] = {};
-    std::snprintf(page, sizeof(page), "PAGE %d OF %d",
-                  s_reader_page + 1, beta_reader::PageCount());
-    const int footer_width = static_cast<int>(std::strlen(page)) * 6;
-    DrawText(fb, (kPortraitWidth - footer_width) / 2, 786, page, 1);
+    const std::string page =
+        "Page " + std::to_string(s_reader_page + 1) + " of " +
+        std::to_string(beta_reader::PageCount());
+    const int footer_width = beta_reader::ReaderFontMeasure(page);
+    DrawReaderText(fb, (kPortraitWidth - footer_width) / 2, 766, page);
+
 }
 
 void RenderReaderOpening(const std::string& title)
@@ -1511,25 +1513,23 @@ void DrawMenuOverlay(uint8_t* fb)
     DrawOutlineRect(fb, 45, 245, 390, 315, 3);
 
     if (s_ui_menu == UiMenu::kChat) {
-        DrawText(fb, 95, 278, "CHAT MENU", 3);
-        DrawText(fb, 72, 335, s_menu_index == 0 ? "> NEW CHAT" : "  NEW CHAT", 3);
-        DrawText(fb, 72, 390,
+        DrawText(fb, 72, 290, s_menu_index == 0 ? "> NEW CHAT" : "  NEW CHAT", 3);
+        DrawText(fb, 72, 355,
                  s_menu_index == 1 ? "> SWITCH TO READ" : "  SWITCH TO READ", 3);
-        DrawText(fb, 72, 445, s_menu_index == 2 ? "> SETTINGS" : "  SETTINGS", 3);
-        DrawText(fb, 72, 500, s_menu_index == 3 ? "> CANCEL" : "  CANCEL", 3);
+        DrawText(fb, 72, 420, s_menu_index == 2 ? "> SETTINGS" : "  SETTINGS", 3);
+        DrawText(fb, 72, 485, s_menu_index == 3 ? "> CANCEL" : "  CANCEL", 3);
     } else if (s_ui_menu == UiMenu::kClearConfirm) {
         DrawText(fb, 93, 300, "CLEAR CHAT", 3);
         DrawText(fb, 87, 365, "PRESS TO CONFIRM", 2);
         DrawText(fb, 82, 420, "UP DOWN TO CANCEL", 2);
     } else if (s_ui_menu == UiMenu::kReader) {
-        DrawText(fb, 85, 278, "READER MENU", 3);
         const char* first = s_reader_in_book ? "LIBRARY" : "OPEN BOOK";
         std::string first_line = std::string(s_menu_index == 0 ? "> " : "  ") + first;
-        DrawText(fb, 72, 335, first_line.c_str(), 3);
-        DrawText(fb, 72, 390,
+        DrawText(fb, 72, 290, first_line.c_str(), 3);
+        DrawText(fb, 72, 355,
                  s_menu_index == 1 ? "> SWITCH TO CHAT" : "  SWITCH TO CHAT", 3);
-        DrawText(fb, 72, 445, s_menu_index == 2 ? "> SETTINGS" : "  SETTINGS", 3);
-        DrawText(fb, 72, 500, s_menu_index == 3 ? "> CANCEL" : "  CANCEL", 3);
+        DrawText(fb, 72, 420, s_menu_index == 2 ? "> SETTINGS" : "  SETTINGS", 3);
+        DrawText(fb, 72, 485, s_menu_index == 3 ? "> CANCEL" : "  CANCEL", 3);
     }
 }
 
