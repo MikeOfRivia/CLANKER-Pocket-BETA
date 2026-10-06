@@ -3,8 +3,7 @@ name: Apply reader footer and menu cleanup
 on:
   push:
     branches: [feature/chat-read-ui]
-    paths:
-      - .github/workflows/patch-reader-ui.yml
+    paths: [.github/workflows/patch-reader-ui.yml]
 
 permissions:
   contents: write
@@ -17,55 +16,58 @@ jobs:
         with:
           ref: feature/chat-read-ui
           fetch-depth: 0
-
-      - name: Patch UI
+      - name: Patch reader footer and menus
         shell: bash
         run: |
           python - <<'PY'
           from pathlib import Path
-          p = Path("main/main.cpp")
+          p = Path('main/main.cpp')
           s = p.read_text()
 
-          old = """    {'0', {14,17,19,21,25,17,14}}, {'1', {4,12,4,4,4,4,14}},
-    {'4', {2,6,10,18,31,2,2}}, {'5', {31,16,16,30,1,1,30}},
-"""
-          new = """    {'0', {14,17,19,21,25,17,14}}, {'1', {4,12,4,4,4,4,14}},
-    {'2', {14,17,1,2,4,8,31}}, {'3', {30,1,1,14,1,1,30}},
-    {'4', {2,6,10,18,31,2,2}}, {'5', {31,16,16,30,1,1,30}},
-"""
-          if old not in s:
-              raise SystemExit("digit glyph block not found")
-          s = s.replace(old, new, 1)
+          old_digits = "    {'0', {14,17,19,21,25,17,14}}, {'1', {4,12,4,4,4,4,14}},\n"
+          new_digits = old_digits + "    {'2', {14,17,1,2,4,8,31}}, {'3', {30,1,1,14,1,1,30}},\n"
+          if s.count(old_digits) != 1:
+              raise SystemExit(f'digit insertion point: expected 1 match, found {s.count(old_digits)}')
+          s = s.replace(old_digits, new_digits, 1)
 
-          s = s.replace('        DrawText(fb, 95, 278, "CHAT MENU", 3);\n', '', 1)
-          s = s.replace('        DrawText(fb, 85, 278, "READER MENU", 3);\n', '', 1)
+          for title in [
+              '        DrawText(fb, 95, 278, "CHAT MENU", 3);\n',
+              '        DrawText(fb, 85, 278, "READER MENU", 3);\n',
+          ]:
+              if s.count(title) != 1:
+                  raise SystemExit(f'menu title: expected 1 match, found {s.count(title)}')
+              s = s.replace(title, '', 1)
 
           for old_y, new_y in [(335, 290), (390, 355), (445, 420), (500, 485)]:
-              s = s.replace(f'DrawText(fb, 72, {old_y},', f'DrawText(fb, 72, {new_y},')
+              old = f'DrawText(fb, 72, {old_y},'
+              new = f'DrawText(fb, 72, {new_y},'
+              if s.count(old) != 2:
+                  raise SystemExit(f'menu y {old_y}: expected 2 matches, found {s.count(old)}')
+              s = s.replace(old, new)
 
-          old_footer = """    char page[48] = {};
-    std::snprintf(page, sizeof(page), "PAGE %d OF %d",
-                  s_reader_page + 1, beta_reader::PageCount());
-    const int footer_width = static_cast<int>(std::strlen(page)) * 6;
-    DrawText(fb, (kPortraitWidth - footer_width) / 2, 786, page, 1);
-"""
-          new_footer = """    const std::string page =
-        "Page " + std::to_string(s_reader_page + 1) + " of " +
-        std::to_string(beta_reader::PageCount());
-    const int footer_width = beta_reader::ReaderFontMeasure(page);
-    DrawReaderText(fb, (kPortraitWidth - footer_width) / 2, 766, page);
-"""
-          if old_footer not in s:
-              raise SystemExit("reader footer block not found")
-          s = s.replace(old_footer, new_footer, 1)
+          start_marker = '    char page[48] = {};\n'
+          end_marker = '\n}\n\nvoid RenderReaderOpening'
+          start = s.find(start_marker)
+          if start < 0:
+              raise SystemExit('reader footer start not found')
+          end = s.find(end_marker, start)
+          if end < 0:
+              raise SystemExit('reader footer end not found')
+          footer = (
+              '    const std::string page =\n'
+              '        "Page " + std::to_string(s_reader_page + 1) + " of " +\n'
+              '        std::to_string(beta_reader::PageCount());\n'
+              '    const int footer_width = beta_reader::ReaderFontMeasure(page);\n'
+              '    DrawReaderText(fb, (kPortraitWidth - footer_width) / 2, 766, page);\n'
+          )
+          s = s[:start] + footer + s[end:]
 
           p.write_text(s)
           PY
 
-      - name: Commit changes
-        run: |
           git config user.name "CLANKER CI"
           git config user.email "clanker-ci@users.noreply.github.com"
           git add main/main.cpp
+          git rm .github/workflows/patch-reader-ui.yml
           git commit -m "Polish reader footer and menus"
           git push origin HEAD:feature/chat-read-ui
