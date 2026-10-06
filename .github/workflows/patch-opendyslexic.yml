@@ -38,7 +38,7 @@ jobs:
           font_size = 20
           first = 0x20
           last = 0x7E
-          baseline_px = 22
+          baseline_px = 23
           line_height_px = 29
 
           font = ImageFont.truetype(font_path, font_size)
