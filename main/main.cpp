@@ -1502,31 +1502,31 @@ void DrawSettingsBody(uint8_t* fb)
     const char* wifi =
         net.mode == beta_network::Mode::kConnected ? "ONLINE" :
         net.mode == beta_network::Mode::kProvisioning ? "SETUP" : "OFFLINE";
+    const char* ai = beta_transcription::HasApiKey() ? "READY" : "MISSING";
 
-    DrawText(fb, 28, 112, "STATUS", 3);
-    DrawText(fb, 28, 157, "WIFI", 2);
-    DrawText(fb, 190, 157, wifi, 2);
-    DrawText(fb, 28, 197, "OPENAI", 2);
-    DrawText(fb, 190, 197,
-             beta_transcription::HasApiKey() ? "READY" : "MISSING", 2);
-
-    char battery[32] = {};
+    char battery[16] = {};
     if (s_pmic && s_pmic->isBatteryConnect()) {
         const int level = s_pmic->GetBatteryLevel();
         if (level >= 0) std::snprintf(battery, sizeof(battery), "%d%%", level);
-        else std::snprintf(battery, sizeof(battery), "CONNECTED");
+        else std::snprintf(battery, sizeof(battery), "--");
     } else {
-        std::snprintf(battery, sizeof(battery), "NO PACK");
+        std::snprintf(battery, sizeof(battery), "--");
     }
-    DrawText(fb, 28, 237, "BATTERY", 2);
-    DrawText(fb, 190, 237, battery, 2);
 
-    int options_top = 295;
+    std::string wifi_status = std::string("WIFI ") + wifi;
+    std::string ai_status = std::string("AI ") + ai;
+    std::string battery_status = std::string("BAT ") + battery;
+
+    DrawText(fb, 28, 108, wifi_status.c_str(), 2);
+    DrawText(fb, 182, 108, ai_status.c_str(), 2);
+    DrawText(fb, 326, 108, battery_status.c_str(), 2);
+
+    int options_top = 170;
     if (net.mode == beta_network::Mode::kProvisioning) {
-        DrawText(fb, 28, 277, "AP", 2);
-        DrawText(fb, 82, 277, net.ap_name.c_str(), 2);
-        DrawText(fb, 28, 312, "OPEN 192.168.4.1", 2);
-        options_top = 355;
+        std::string ap = std::string("AP ") + net.ap_name;
+        DrawText(fb, 28, 150, ap.c_str(), 2);
+        DrawText(fb, 28, 188, "OPEN 192.168.4.1", 2);
+        options_top = 240;
     }
 
     DrawDivider(fb, options_top - 18);
