@@ -88,9 +88,9 @@ enum class UiMode : uint8_t { kChat = 0, kRead = 1 };
 enum class MicState : uint8_t { kIdle, kRecording, kProcessing };
 enum class UiMenu : uint8_t { kNone, kChat, kClearConfirm, kReader };
 enum class SettingsItem : uint8_t {
-    kFontToggle = 0,
-    kNetworkSetup,
-    kTestConnection,
+    kWifi = 0,
+    kAccessPoint,
+    kFont,
     kBack,
     kCount,
 };
@@ -1180,9 +1180,7 @@ void DrawTopBar(uint8_t* fb)
 {
     DrawClankerWordmark(fb, 12, 20);
 
-    if (s_settings_open) {
-        DrawText(fb, 304, 30, "SETTINGS", 2);
-    } else {
+    if (!s_settings_open) {
         const char* mode = s_ui_mode == UiMode::kChat ? "< CHAT >" : "< READ >";
         DrawText(fb, 292, 30, mode, 2);
     }
@@ -1499,12 +1497,27 @@ void RenderReaderOpening(const std::string& title)
 void DrawSettingsBody(uint8_t* fb)
 {
     const beta_network::Snapshot net = beta_network::GetSnapshot();
-    const char* wifi =
-        net.mode == beta_network::Mode::kConnected ? "ONLINE" :
-        net.mode == beta_network::Mode::kProvisioning ? "SETUP" : "OFFLINE";
-    const char* ai = beta_transcription::HasApiKey() ? "READY" : "MISSING";
 
-    char battery[16] = {};
+    DrawText(fb, 28, 112, "SETTINGS", 3);
+
+    auto row = [&](int index, int y, const std::string& text) {
+        std::string line = s_settings_index == index ? "> " : "  ";
+        line += text;
+        DrawText(fb, 28, y, line.c_str(), 2);
+    };
+
+    row(static_cast<int>(SettingsItem::kWifi), 170,
+        std::string("WIFI: ") + (net.wifi_enabled ? "ON" : "OFF"));
+    row(static_cast<int>(SettingsItem::kAccessPoint), 225,
+        std::string("ACCESS POINT (SETUP): ") +
+            (net.ap_enabled ? "ON" : "OFF"));
+    row(static_cast<int>(SettingsItem::kFont), 280,
+        std::string("FONT: ") + beta_reader::ReaderFontName());
+
+    DrawDivider(fb, 335);
+    DrawText(fb, 28, 365, "STATUS", 3);
+
+    char battery[32] = {};
     if (s_pmic && s_pmic->isBatteryConnect()) {
         const int level = s_pmic->GetBatteryLevel();
         if (level >= 0) std::snprintf(battery, sizeof(battery), "%d%%", level);
@@ -1513,42 +1526,27 @@ void DrawSettingsBody(uint8_t* fb)
         std::snprintf(battery, sizeof(battery), "--");
     }
 
-    std::string wifi_status = std::string("WIFI ") + wifi;
-    std::string ai_status = std::string("AI ") + ai;
-    std::string battery_status = std::string("BAT ") + battery;
+    std::string battery_line = std::string("BATTERY: ") + battery;
+    DrawText(fb, 28, 425, battery_line.c_str(), 2);
 
-    DrawText(fb, 28, 108, wifi_status.c_str(), 2);
-    DrawText(fb, 182, 108, ai_status.c_str(), 2);
-    DrawText(fb, 326, 108, battery_status.c_str(), 2);
-
-    int options_top = 170;
-    if (net.mode == beta_network::Mode::kProvisioning) {
-        std::string ap = std::string("AP ") + net.ap_name;
-        DrawText(fb, 28, 150, ap.c_str(), 2);
-        DrawText(fb, 28, 188, "OPEN 192.168.4.1", 2);
-        options_top = 240;
+    std::string wifi_value;
+    if (!net.wifi_enabled) {
+        wifi_value = "OFF";
+    } else if (!net.current_ssid.empty()) {
+        wifi_value = net.current_ssid;
+    } else {
+        wifi_value = "NOT CONNECTED";
     }
+    const std::string wifi_line =
+        ClipDisplayText(std::string("WIFI: ") + wifi_value, 36);
+    DrawText(fb, 28, 475, wifi_line.c_str(), 2);
 
-    DrawDivider(fb, options_top - 18);
-    DrawText(fb, 28, options_top, "OPTIONS", 3);
+    const std::string openai_line =
+        std::string("OPENAI: ") +
+        (beta_transcription::HasApiKey() ? "ENABLED" : "DISABLED");
+    DrawText(fb, 28, 525, openai_line.c_str(), 2);
 
-    auto row = [&](int index, int y, const char* label,
-                   const char* value = nullptr) {
-        std::string line = s_settings_index == index ? "> " : "  ";
-        line += label;
-        DrawText(fb, 28, y, line.c_str(), 2);
-        if (value) DrawText(fb, 270, y, value, 2);
-    };
-
-    const int row0 = options_top + 52;
-    constexpr int kRowGap = 58;
-    row(static_cast<int>(SettingsItem::kFontToggle), row0,
-        "FONT TOGGLE", beta_reader::ReaderFontName());
-    row(static_cast<int>(SettingsItem::kNetworkSetup), row0 + kRowGap,
-        "TURN ON AP FOR WIFI/AI SETUP");
-    row(static_cast<int>(SettingsItem::kTestConnection), row0 + 2 * kRowGap,
-        "TEST CONNECTION");
-    row(static_cast<int>(SettingsItem::kBack), row0 + 3 * kRowGap, "BACK");
+    row(static_cast<int>(SettingsItem::kBack), 610, "BACK");
 }
 
 void DrawMenuOverlay(uint8_t* fb)
@@ -1702,7 +1700,27 @@ void HandleSelectShort(bool audible = true)
         const SettingsItem item =
             static_cast<SettingsItem>(s_settings_index);
 
-        if (item == SettingsItem::kFontToggle) {
+        if (item == SettingsItem::kWifi) {
+            const beta_network::Snapshot net = beta_network::GetSnapshot();
+            const esp_err_t err =
+                beta_network::SetWifiEnabled(!net.wifi_enabled);
+            if (err != ESP_OK) {
+                ESP_LOGW(kTag, "Wi-Fi toggle failed: %s",
+                         esp_err_to_name(err));
+            }
+            RenderUi();
+            RefreshUiPartial();
+        } else if (item == SettingsItem::kAccessPoint) {
+            const beta_network::Snapshot net = beta_network::GetSnapshot();
+            const esp_err_t err =
+                beta_network::SetProvisioningEnabled(!net.ap_enabled);
+            if (err != ESP_OK) {
+                ESP_LOGW(kTag, "AP toggle failed: %s",
+                         esp_err_to_name(err));
+            }
+            RenderUi();
+            RefreshUiPartial();
+        } else if (item == SettingsItem::kFont) {
             const beta_reader::ReaderFontFace next =
                 beta_reader::GetReaderFontFace() ==
                         beta_reader::ReaderFontFace::kOpenDyslexic
@@ -1715,18 +1733,6 @@ void HandleSelectShort(bool audible = true)
             }
             s_chat_scroll_px = 0;
             SaveUiState();
-            RenderUi();
-            RefreshUiPartial();
-        } else if (item == SettingsItem::kNetworkSetup) {
-            const esp_err_t err = beta_network::StartProvisioning();
-            if (err != ESP_OK) {
-                ESP_LOGW(kTag, "Provisioning start failed: %s",
-                         esp_err_to_name(err));
-            }
-            RenderUi();
-            (void)s_panel->RefreshFastBase();
-        } else if (item == SettingsItem::kTestConnection) {
-            beta_network::RunHttpsProbe();
             RenderUi();
             RefreshUiPartial();
         } else {

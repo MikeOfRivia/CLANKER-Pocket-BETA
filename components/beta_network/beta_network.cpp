@@ -41,15 +41,17 @@ constexpr int kProbeTimeoutMs = 15000;
 std::mutex s_mutex;
 Snapshot s_snapshot = {};
 EventGroupHandle_t s_wifi_events = nullptr;
-int s_retry_count = 0;
 httpd_handle_t s_server = nullptr;
-std::atomic<bool> s_provisioning_requested{false};
 
-void SetSnapshot(const Snapshot& snapshot)
-{
-    std::lock_guard<std::mutex> lock(s_mutex);
-    s_snapshot = snapshot;
-}
+std::atomic<bool> s_manual_transition{false};
+bool s_wifi_started = false;
+bool s_sta_enabled = false;
+bool s_ap_enabled = false;
+bool s_sta_connected = false;
+int s_retry_count = 0;
+std::string s_station_ssid;
+std::string s_station_password;
+std::string s_ap_name;
 
 bool LoadString(nvs_handle_t handle, const char* key, std::string* out)
 {
@@ -99,48 +101,6 @@ bool SaveOpenAiKey(const std::string& api_key)
     return err == ESP_OK;
 }
 
-std::string UrlDecode(const char* input)
-{
-    std::string out;
-    if (!input) return out;
-    for (size_t i = 0; input[i] != '\0'; ++i) {
-        if (input[i] == '+') {
-            out.push_back(' ');
-        } else if (input[i] == '%' &&
-                   std::isxdigit(static_cast<unsigned char>(input[i + 1])) &&
-                   std::isxdigit(static_cast<unsigned char>(input[i + 2]))) {
-            auto hex = [](char c) -> int {
-                if (c >= '0' && c <= '9') return c - '0';
-                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                return c - 'a' + 10;
-            };
-            out.push_back(static_cast<char>((hex(input[i + 1]) << 4) | hex(input[i + 2])));
-            i += 2;
-        } else {
-            out.push_back(input[i]);
-        }
-    }
-    return out;
-}
-
-void WifiEventHandler(void*, esp_event_base_t event_base, int32_t event_id, void*)
-{
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (s_provisioning_requested.load()) return;
-        if (s_retry_count < kMaxRetries) {
-            ++s_retry_count;
-            esp_wifi_connect();
-        } else if (s_wifi_events) {
-            xEventGroupSetBits(s_wifi_events, kFailedBit);
-        }
-    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        s_retry_count = 0;
-        if (s_wifi_events) xEventGroupSetBits(s_wifi_events, kConnectedBit);
-    }
-}
-
 bool HasStoredOpenAiKey()
 {
     nvs_handle_t handle = 0;
@@ -149,6 +109,62 @@ bool HasStoredOpenAiKey()
     const bool ok = LoadString(handle, kOpenAiApiKeyKey, &key);
     nvs_close(handle);
     return ok;
+}
+
+std::string UrlDecode(const char* input)
+{
+    std::string out;
+    if (!input) return out;
+    for (size_t i = 0; input[i] != '\0'; ++i) {
+        if (input[i] == '+') {
+            out.push_back(' ');
+        } else if (input[i] == '%' &&
+                   input[i + 1] != '\0' && input[i + 2] != '\0' &&
+                   std::isxdigit(static_cast<unsigned char>(input[i + 1])) &&
+                   std::isxdigit(static_cast<unsigned char>(input[i + 2]))) {
+            auto hex = [](char c) -> int {
+                if (c >= '0' && c <= '9') return c - '0';
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                return c - 'a' + 10;
+            };
+            out.push_back(static_cast<char>(
+                (hex(input[i + 1]) << 4) | hex(input[i + 2])));
+            i += 2;
+        } else {
+            out.push_back(input[i]);
+        }
+    }
+    return out;
+}
+
+void PublishSnapshot(const char* status)
+{
+    Snapshot snap = {};
+    snap.wifi_enabled = s_sta_enabled;
+    snap.ap_enabled = s_ap_enabled;
+    snap.ap_name = s_ap_enabled ? s_ap_name : "";
+    snap.current_ssid = s_sta_connected ? s_station_ssid : "";
+    snap.status = status ? status : "";
+
+    if (s_sta_connected) {
+        snap.mode = Mode::kConnected;
+    } else if (s_ap_enabled) {
+        snap.mode = Mode::kProvisioning;
+    } else {
+        snap.mode = Mode::kDisconnected;
+    }
+
+    std::lock_guard<std::mutex> lock(s_mutex);
+    snap.http_status = s_snapshot.http_status;
+    snap.probe_error = s_snapshot.probe_error;
+    s_snapshot = std::move(snap);
+}
+
+void StopHttpServer()
+{
+    if (!s_server) return;
+    httpd_stop(s_server);
+    s_server = nullptr;
 }
 
 esp_err_t RootHandler(httpd_req_t* req)
@@ -243,69 +259,191 @@ esp_err_t SaveHandler(httpd_req_t* req)
     return ESP_OK;
 }
 
-esp_err_t StartProvisioningAp()
+esp_err_t StartHttpServer()
 {
+    if (s_server) return ESP_OK;
+
+    httpd_config_t server_config = HTTPD_DEFAULT_CONFIG();
+    ESP_RETURN_ON_ERROR(
+        httpd_start(&s_server, &server_config), kTag, "HTTP server");
+
+    httpd_uri_t root = {
+        .uri="/",
+        .method=HTTP_GET,
+        .handler=RootHandler,
+        .user_ctx=nullptr
+    };
+    httpd_uri_t save = {
+        .uri="/save",
+        .method=HTTP_POST,
+        .handler=SaveHandler,
+        .user_ctx=nullptr
+    };
+
+    esp_err_t err = httpd_register_uri_handler(s_server, &root);
+    if (err == ESP_OK) err = httpd_register_uri_handler(s_server, &save);
+    if (err != ESP_OK) {
+        StopHttpServer();
+        return err;
+    }
+    return ESP_OK;
+}
+
+void EnsureApName()
+{
+    if (!s_ap_name.empty()) return;
     uint8_t mac[6] = {};
     esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
     char ap_name[32] = {};
     std::snprintf(ap_name, sizeof(ap_name), "CLANKERBETA-%02X%02X%02X",
                   mac[3], mac[4], mac[5]);
+    s_ap_name = ap_name;
+}
+
+esp_err_t ConfigureAp()
+{
+    EnsureApName();
 
     wifi_config_t ap = {};
-    std::strncpy(reinterpret_cast<char*>(ap.ap.ssid), ap_name, sizeof(ap.ap.ssid) - 1);
-    ap.ap.ssid_len = static_cast<uint8_t>(std::strlen(ap_name));
+    std::strncpy(reinterpret_cast<char*>(ap.ap.ssid),
+                 s_ap_name.c_str(), sizeof(ap.ap.ssid) - 1);
+    ap.ap.ssid_len = static_cast<uint8_t>(s_ap_name.size());
     ap.ap.channel = 1;
     ap.ap.max_connection = 4;
     ap.ap.authmode = WIFI_AUTH_OPEN;
+    return esp_wifi_set_config(WIFI_IF_AP, &ap);
+}
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap));
-    ESP_ERROR_CHECK(esp_wifi_start());
+esp_err_t ConfigureStation()
+{
+    if (s_station_ssid.empty() &&
+        !LoadCredentials(&s_station_ssid, &s_station_password)) {
+        return ESP_ERR_NOT_FOUND;
+    }
 
-    httpd_config_t server_config = HTTPD_DEFAULT_CONFIG();
-    ESP_RETURN_ON_ERROR(httpd_start(&s_server, &server_config), kTag, "HTTP server");
+    wifi_config_t sta = {};
+    std::strncpy(reinterpret_cast<char*>(sta.sta.ssid),
+                 s_station_ssid.c_str(), sizeof(sta.sta.ssid) - 1);
+    std::strncpy(reinterpret_cast<char*>(sta.sta.password),
+                 s_station_password.c_str(), sizeof(sta.sta.password) - 1);
+    sta.sta.threshold.authmode = WIFI_AUTH_OPEN;
+    return esp_wifi_set_config(WIFI_IF_STA, &sta);
+}
 
-    httpd_uri_t root = {.uri="/", .method=HTTP_GET, .handler=RootHandler, .user_ctx=nullptr};
-    httpd_uri_t save = {.uri="/save", .method=HTTP_POST, .handler=SaveHandler, .user_ctx=nullptr};
-    ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &root));
-    ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &save));
+esp_err_t ApplyRadioState()
+{
+    s_manual_transition.store(true);
+    s_retry_count = 0;
+    s_sta_connected = false;
 
-    Snapshot snap = {};
-    snap.mode = Mode::kProvisioning;
-    snap.status = "OPEN 192.168.4.1";
-    snap.ap_name = ap_name;
-    SetSnapshot(snap);
-    ESP_LOGI(kTag, "Provisioning AP ready: %s", ap_name);
+    if (s_wifi_events) {
+        xEventGroupClearBits(s_wifi_events, kConnectedBit | kFailedBit);
+    }
+
+    if (!s_ap_enabled) StopHttpServer();
+
+    if (s_wifi_started) {
+        (void)esp_wifi_disconnect();
+        (void)esp_wifi_stop();
+        s_wifi_started = false;
+    }
+
+    if (!s_sta_enabled && !s_ap_enabled) {
+        s_manual_transition.store(false);
+        PublishSnapshot("RADIO OFF");
+        return ESP_OK;
+    }
+
+    wifi_mode_t mode = WIFI_MODE_NULL;
+    if (s_sta_enabled && s_ap_enabled) mode = WIFI_MODE_APSTA;
+    else if (s_sta_enabled) mode = WIFI_MODE_STA;
+    else mode = WIFI_MODE_AP;
+
+    esp_err_t err = esp_wifi_set_mode(mode);
+    if (err != ESP_OK) {
+        s_manual_transition.store(false);
+        PublishSnapshot("WIFI MODE ERROR");
+        return err;
+    }
+
+    if (s_sta_enabled) {
+        err = ConfigureStation();
+        if (err != ESP_OK) {
+            s_sta_enabled = false;
+            if (!s_ap_enabled) {
+                s_manual_transition.store(false);
+                PublishSnapshot("NO WIFI SETTINGS");
+                return err;
+            }
+            mode = WIFI_MODE_AP;
+            ESP_RETURN_ON_ERROR(
+                esp_wifi_set_mode(mode), kTag, "fallback AP mode");
+        }
+    }
+
+    if (s_ap_enabled) {
+        err = ConfigureAp();
+        if (err != ESP_OK) {
+            s_manual_transition.store(false);
+            PublishSnapshot("AP CONFIG ERROR");
+            return err;
+        }
+    }
+
+    err = esp_wifi_start();
+    if (err != ESP_OK) {
+        s_manual_transition.store(false);
+        PublishSnapshot("WIFI START ERROR");
+        return err;
+    }
+    s_wifi_started = true;
+    s_manual_transition.store(false);
+
+    if (s_ap_enabled) {
+        err = StartHttpServer();
+        if (err != ESP_OK) {
+            PublishSnapshot("AP SERVER ERROR");
+            return err;
+        }
+        ESP_LOGI(kTag, "Setup AP ready: %s", s_ap_name.c_str());
+    }
+
+    if (s_sta_enabled) PublishSnapshot("WIFI CONNECTING");
+    else PublishSnapshot("SETUP AP ON");
     return ESP_OK;
 }
 
-esp_err_t ConnectStation(const std::string& ssid, const std::string& password)
+void WifiEventHandler(void*, esp_event_base_t event_base, int32_t event_id, void*)
 {
-    s_provisioning_requested.store(false);
-    wifi_config_t sta = {};
-    std::strncpy(reinterpret_cast<char*>(sta.sta.ssid), ssid.c_str(), sizeof(sta.sta.ssid) - 1);
-    std::strncpy(reinterpret_cast<char*>(sta.sta.password), password.c_str(),
-                 sizeof(sta.sta.password) - 1);
-    sta.sta.threshold.authmode = WIFI_AUTH_OPEN;
-
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta));
-    ESP_ERROR_CHECK(esp_wifi_start());
-
-    EventBits_t bits = xEventGroupWaitBits(s_wifi_events, kConnectedBit | kFailedBit,
-                                           pdFALSE, pdFALSE, pdMS_TO_TICKS(20000));
-    if ((bits & kConnectedBit) == 0) {
-        ESP_LOGW(kTag, "STA connect failed; falling back to provisioning AP");
-        esp_wifi_stop();
-        return ESP_FAIL;
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        if (s_sta_enabled) (void)esp_wifi_connect();
+        return;
     }
 
-    Snapshot snap = {};
-    snap.mode = Mode::kConnected;
-    snap.status = "WIFI CONNECTED";
-    SetSnapshot(snap);
-    ESP_LOGI(kTag, "Wi-Fi connected to %s", ssid.c_str());
-    return ESP_OK;
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        s_sta_connected = false;
+        if (s_manual_transition.load() || !s_sta_enabled) {
+            PublishSnapshot(s_ap_enabled ? "SETUP AP ON" : "WIFI OFF");
+            return;
+        }
+
+        if (s_retry_count < kMaxRetries) {
+            ++s_retry_count;
+            PublishSnapshot("WIFI CONNECTING");
+            (void)esp_wifi_connect();
+        } else {
+            PublishSnapshot("WIFI DISCONNECTED");
+            if (s_wifi_events) xEventGroupSetBits(s_wifi_events, kFailedBit);
+        }
+        return;
+    }
+
+    if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        s_retry_count = 0;
+        s_sta_connected = true;
+        PublishSnapshot("WIFI CONNECTED");
+        if (s_wifi_events) xEventGroupSetBits(s_wifi_events, kConnectedBit);
+    }
 }
 
 }  // namespace
@@ -313,7 +451,8 @@ esp_err_t ConnectStation(const std::string& ssid, const std::string& password)
 esp_err_t Init()
 {
     esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
+        err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
         err = nvs_flash_init();
     }
@@ -332,40 +471,61 @@ esp_err_t Init()
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_RETURN_ON_ERROR(esp_wifi_init(&cfg), kTag, "Wi-Fi init");
 
-    ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
-                                               &WifiEventHandler, nullptr));
-    ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
-                                               &WifiEventHandler, nullptr));
+    ESP_ERROR_CHECK(esp_event_handler_register(
+        WIFI_EVENT, ESP_EVENT_ANY_ID, &WifiEventHandler, nullptr));
+    ESP_ERROR_CHECK(esp_event_handler_register(
+        IP_EVENT, IP_EVENT_STA_GOT_IP, &WifiEventHandler, nullptr));
 
-    std::string ssid;
-    std::string password;
-    if (!LoadCredentials(&ssid, &password)) {
-        return StartProvisioning();
+    s_station_ssid.clear();
+    s_station_password.clear();
+    const bool have_credentials =
+        LoadCredentials(&s_station_ssid, &s_station_password);
+
+    s_sta_enabled = have_credentials;
+    s_ap_enabled = !have_credentials;
+
+    ESP_RETURN_ON_ERROR(ApplyRadioState(), kTag, "initial radio state");
+
+    if (!s_sta_enabled) return ESP_OK;
+
+    const EventBits_t bits = xEventGroupWaitBits(
+        s_wifi_events, kConnectedBit | kFailedBit,
+        pdFALSE, pdFALSE, pdMS_TO_TICKS(20000));
+
+    if ((bits & kConnectedBit) != 0) return ESP_OK;
+
+    ESP_LOGW(kTag, "STA connect failed; enabling setup AP");
+    s_ap_enabled = true;
+    return ApplyRadioState();
+}
+
+esp_err_t SetWifiEnabled(bool enabled)
+{
+    if (enabled == s_sta_enabled) return ESP_OK;
+
+    if (enabled) {
+        s_station_ssid.clear();
+        s_station_password.clear();
+        if (!LoadCredentials(&s_station_ssid, &s_station_password)) {
+            PublishSnapshot("NO WIFI SETTINGS");
+            return ESP_ERR_NOT_FOUND;
+        }
     }
-    if (ConnectStation(ssid, password) == ESP_OK) {
-        return ESP_OK;
-    }
-    return StartProvisioning();
+
+    s_sta_enabled = enabled;
+    return ApplyRadioState();
+}
+
+esp_err_t SetProvisioningEnabled(bool enabled)
+{
+    if (enabled == s_ap_enabled) return ESP_OK;
+    s_ap_enabled = enabled;
+    return ApplyRadioState();
 }
 
 esp_err_t StartProvisioning()
 {
-    s_provisioning_requested.store(true);
-    s_retry_count = 0;
-    if (s_wifi_events) {
-        xEventGroupClearBits(s_wifi_events, kConnectedBit | kFailedBit);
-    }
-
-    if (s_server) {
-        httpd_stop(s_server);
-        s_server = nullptr;
-    }
-
-    // Safe whether Wi-Fi is connected, failed, or already stopped.
-    (void)esp_wifi_disconnect();
-    (void)esp_wifi_stop();
-
-    return StartProvisioningAp();
+    return SetProvisioningEnabled(true);
 }
 
 Snapshot GetSnapshot()
@@ -388,7 +548,8 @@ void RunHttpsProbe()
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (!client) {
         snap.probe_error = "CLIENT INIT FAILED";
-        SetSnapshot(snap);
+        std::lock_guard<std::mutex> lock(s_mutex);
+        s_snapshot = snap;
         return;
     }
 
@@ -401,7 +562,13 @@ void RunHttpsProbe()
         snap.probe_error = esp_err_to_name(err);
     }
     esp_http_client_cleanup(client);
-    SetSnapshot(snap);
+
+    {
+        std::lock_guard<std::mutex> lock(s_mutex);
+        // Keep live radio state that may have changed during the probe.
+        s_snapshot.http_status = snap.http_status;
+        s_snapshot.probe_error = snap.probe_error;
+    }
 
     ESP_LOGI(kTag, "HTTPS probe: err=%s status=%d",
              esp_err_to_name(err), snap.http_status);
