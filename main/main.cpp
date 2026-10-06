@@ -89,6 +89,7 @@ enum class MicState : uint8_t { kIdle, kRecording, kProcessing };
 enum class UiMenu : uint8_t { kNone, kChat, kClearConfirm, kReader };
 enum class SettingsItem : uint8_t {
     kTextFont = 0,
+    kNetworkSetup,
     kCleanDisplay,
     kTestConnection,
     kBack,
@@ -1503,11 +1504,11 @@ void DrawSettingsBody(uint8_t* fb)
         net.mode == beta_network::Mode::kConnected ? "ONLINE" :
         net.mode == beta_network::Mode::kProvisioning ? "SETUP" : "OFFLINE";
 
-    DrawText(fb, 28, 122, "STATUS", 3);
-    DrawText(fb, 28, 172, "WIFI", 2);
-    DrawText(fb, 190, 172, wifi, 2);
-    DrawText(fb, 28, 212, "OPENAI", 2);
-    DrawText(fb, 190, 212,
+    DrawText(fb, 28, 112, "STATUS", 3);
+    DrawText(fb, 28, 157, "WIFI", 2);
+    DrawText(fb, 190, 157, wifi, 2);
+    DrawText(fb, 28, 197, "OPENAI", 2);
+    DrawText(fb, 190, 197,
              beta_transcription::HasApiKey() ? "READY" : "MISSING", 2);
 
     char battery[32] = {};
@@ -1518,11 +1519,19 @@ void DrawSettingsBody(uint8_t* fb)
     } else {
         std::snprintf(battery, sizeof(battery), "NO PACK");
     }
-    DrawText(fb, 28, 252, "BATTERY", 2);
-    DrawText(fb, 190, 252, battery, 2);
+    DrawText(fb, 28, 237, "BATTERY", 2);
+    DrawText(fb, 190, 237, battery, 2);
 
-    DrawDivider(fb, 300);
-    DrawText(fb, 28, 332, "OPTIONS", 3);
+    int options_top = 295;
+    if (net.mode == beta_network::Mode::kProvisioning) {
+        DrawText(fb, 28, 277, "AP", 2);
+        DrawText(fb, 82, 277, net.ap_name.c_str(), 2);
+        DrawText(fb, 28, 312, "OPEN 192.168.4.1", 2);
+        options_top = 355;
+    }
+
+    DrawDivider(fb, options_top - 18);
+    DrawText(fb, 28, options_top, "OPTIONS", 3);
 
     auto row = [&](int index, int y, const char* label,
                    const char* value = nullptr) {
@@ -1532,16 +1541,22 @@ void DrawSettingsBody(uint8_t* fb)
         if (value) DrawText(fb, 270, y, value, 2);
     };
 
-    row(static_cast<int>(SettingsItem::kTextFont), 382,
+    const int row0 = options_top + 45;
+    constexpr int kRowGap = 43;
+    row(static_cast<int>(SettingsItem::kTextFont), row0,
         "TEXT FONT", beta_reader::ReaderFontName());
-    row(static_cast<int>(SettingsItem::kCleanDisplay), 432, "CLEAN DISPLAY");
-    row(static_cast<int>(SettingsItem::kTestConnection), 482,
+    row(static_cast<int>(SettingsItem::kNetworkSetup), row0 + kRowGap,
+        "WIFI / API SETUP");
+    row(static_cast<int>(SettingsItem::kCleanDisplay), row0 + 2 * kRowGap,
+        "CLEAN DISPLAY");
+    row(static_cast<int>(SettingsItem::kTestConnection), row0 + 3 * kRowGap,
         "TEST CONNECTION");
-    row(static_cast<int>(SettingsItem::kBack), 532, "BACK");
+    row(static_cast<int>(SettingsItem::kBack), row0 + 4 * kRowGap, "BACK");
 
-    DrawDivider(fb, 590);
-    DrawText(fb, 28, 625, "UP DOWN TO MOVE", 2);
-    DrawText(fb, 28, 665, "SELECT TO CHANGE", 2);
+    const int help_y = row0 + 4 * kRowGap + 42;
+    DrawDivider(fb, help_y - 12);
+    DrawText(fb, 28, help_y + 12, "UP DOWN TO MOVE", 2);
+    DrawText(fb, 28, help_y + 47, "SELECT TO CHANGE", 2);
 }
 
 void DrawMenuOverlay(uint8_t* fb)
@@ -1710,6 +1725,14 @@ void HandleSelectShort(bool audible = true)
             SaveUiState();
             RenderUi();
             RefreshUiPartial();
+        } else if (item == SettingsItem::kNetworkSetup) {
+            const esp_err_t err = beta_network::StartProvisioning();
+            if (err != ESP_OK) {
+                ESP_LOGW(kTag, "Provisioning start failed: %s",
+                         esp_err_to_name(err));
+            }
+            RenderUi();
+            (void)s_panel->RefreshFastBase();
         } else if (item == SettingsItem::kCleanDisplay) {
             RenderUi();
             (void)s_panel->RefreshFullBase();

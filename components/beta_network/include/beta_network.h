@@ -21,6 +21,7 @@ struct Snapshot {
 };
 
 esp_err_t Init();
+esp_err_t StartProvisioning();
 Snapshot GetSnapshot();
 void RunHttpsProbe();
 

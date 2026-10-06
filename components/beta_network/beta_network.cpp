@@ -1,6 +1,7 @@
 #include "beta_network.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
@@ -42,6 +43,7 @@ Snapshot s_snapshot = {};
 EventGroupHandle_t s_wifi_events = nullptr;
 int s_retry_count = 0;
 httpd_handle_t s_server = nullptr;
+std::atomic<bool> s_provisioning_requested{false};
 
 void SetSnapshot(const Snapshot& snapshot)
 {
@@ -126,6 +128,7 @@ void WifiEventHandler(void*, esp_event_base_t event_base, int32_t event_id, void
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (s_provisioning_requested.load()) return;
         if (s_retry_count < kMaxRetries) {
             ++s_retry_count;
             esp_wifi_connect();
@@ -138,57 +141,101 @@ void WifiEventHandler(void*, esp_event_base_t event_base, int32_t event_id, void
     }
 }
 
+bool HasStoredOpenAiKey()
+{
+    nvs_handle_t handle = 0;
+    if (nvs_open(kOpenAiNvsNamespace, NVS_READONLY, &handle) != ESP_OK) return false;
+    std::string key;
+    const bool ok = LoadString(handle, kOpenAiApiKeyKey, &key);
+    nvs_close(handle);
+    return ok;
+}
+
 esp_err_t RootHandler(httpd_req_t* req)
 {
-    static constexpr char kPage[] =
-        "<!doctype html><html><head><meta name=viewport content='width=device-width,initial-scale=1'>"
-        "<title>CLANKER Pocket BETA</title></head><body>"
-        "<h1>CLANKER Pocket BETA</h1><p>Phase 4 provisioning</p>"
-        "<form action='/save' method='get'>"
-        "<label>Wi-Fi SSID<br><input name='ssid' required></label><br><br>"
-        "<label>Wi-Fi Password<br><input name='password' type='password'></label><br><br>"
-        "<label>OpenAI API Key<br><input name='openai' type='password' required></label><br><br>"
-        "<button type='submit'>Save & Reboot</button></form></body></html>";
+    const bool has_key = HasStoredOpenAiKey();
+    std::string page =
+        "<!doctype html><html><head>"
+        "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<title>CLANKER Pocket Setup</title>"
+        "<style>body{font-family:sans-serif;max-width:520px;margin:32px auto;padding:0 18px}"
+        "input{font-size:16px;width:100%;box-sizing:border-box;padding:10px;margin-top:5px}"
+        "button{font-size:16px;padding:12px 18px}</style></head><body>"
+        "<h1>CLANKER Pocket Setup</h1>"
+        "<p>Update Wi-Fi and OpenAI settings, then the Pocket will reboot.</p>"
+        "<form action='/save' method='post'>"
+        "<label>Wi-Fi SSID<input name='ssid' required maxlength='32'></label><br><br>"
+        "<label>Wi-Fi Password<input name='password' type='password' maxlength='64'></label><br><br>"
+        "<label>OpenAI API Key<input name='openai' type='password' maxlength='256'";
+
+    if (!has_key) page += " required";
+    page += "></label>";
+    page += has_key
+        ? "<p><small>An API key is already stored. Leave this blank to keep it.</small></p>"
+        : "<p><small>An OpenAI API key is required the first time.</small></p>";
+    page += "<button type='submit'>Save & Reboot</button></form></body></html>";
+
     httpd_resp_set_type(req, "text/html");
-    return httpd_resp_send(req, kPage, HTTPD_RESP_USE_STRLEN);
+    return httpd_resp_send(req, page.c_str(), page.size());
 }
 
 esp_err_t SaveHandler(httpd_req_t* req)
 {
-    const size_t query_len = httpd_req_get_url_query_len(req);
-    if (query_len == 0 || query_len > 1024) {
+    const size_t body_len = req->content_len;
+    if (body_len == 0 || body_len > 1024) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing settings");
     }
 
-    std::string query(query_len + 1, '\0');
-    if (httpd_req_get_url_query_str(req, query.data(), query.size()) != ESP_OK) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid settings");
+    std::string body(body_len, '\0');
+    size_t received = 0;
+    while (received < body_len) {
+        const int got = httpd_req_recv(
+            req, body.data() + received, body_len - received);
+        if (got <= 0) {
+            return httpd_resp_send_err(
+                req, HTTPD_400_BAD_REQUEST, "Invalid settings");
+        }
+        received += static_cast<size_t>(got);
     }
 
     char ssid_raw[160] = {};
     char password_raw[256] = {};
     char openai_raw[384] = {};
-    if (httpd_query_key_value(query.c_str(), "ssid", ssid_raw, sizeof(ssid_raw)) != ESP_OK) {
+    if (httpd_query_key_value(
+            body.c_str(), "ssid", ssid_raw, sizeof(ssid_raw)) != ESP_OK) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "SSID required");
     }
-    (void)httpd_query_key_value(query.c_str(), "password", password_raw, sizeof(password_raw));
-    if (httpd_query_key_value(query.c_str(), "openai", openai_raw, sizeof(openai_raw)) != ESP_OK) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "OpenAI API key required");
-    }
+    (void)httpd_query_key_value(
+        body.c_str(), "password", password_raw, sizeof(password_raw));
+    (void)httpd_query_key_value(
+        body.c_str(), "openai", openai_raw, sizeof(openai_raw));
 
     const std::string ssid = UrlDecode(ssid_raw);
     const std::string password = UrlDecode(password_raw);
     const std::string openai = UrlDecode(openai_raw);
+
     if (ssid.empty() || ssid.size() > 32 || password.size() > 64 ||
-        openai.empty() || openai.size() > 256) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid settings");
+        openai.size() > 256) {
+        return httpd_resp_send_err(
+            req, HTTPD_400_BAD_REQUEST, "Invalid settings");
     }
-    if (!SaveCredentials(ssid, password) || !SaveOpenAiKey(openai)) {
-        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Save failed");
+    if (openai.empty() && !HasStoredOpenAiKey()) {
+        return httpd_resp_send_err(
+            req, HTTPD_400_BAD_REQUEST, "OpenAI API key required");
+    }
+
+    if (!SaveCredentials(ssid, password)) {
+        return httpd_resp_send_err(
+            req, HTTPD_500_INTERNAL_SERVER_ERROR, "Wi-Fi save failed");
+    }
+    if (!openai.empty() && !SaveOpenAiKey(openai)) {
+        return httpd_resp_send_err(
+            req, HTTPD_500_INTERNAL_SERVER_ERROR, "API key save failed");
     }
 
     static constexpr char kSaved[] =
-        "<html><body><h2>Saved.</h2><p>CLANKER Pocket is rebooting.</p></body></html>";
+        "<html><body><h2>Saved.</h2>"
+        "<p>CLANKER Pocket is rebooting with the new settings.</p></body></html>";
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, kSaved, HTTPD_RESP_USE_STRLEN);
     vTaskDelay(pdMS_TO_TICKS(500));
@@ -219,7 +266,7 @@ esp_err_t StartProvisioningAp()
     ESP_RETURN_ON_ERROR(httpd_start(&s_server, &server_config), kTag, "HTTP server");
 
     httpd_uri_t root = {.uri="/", .method=HTTP_GET, .handler=RootHandler, .user_ctx=nullptr};
-    httpd_uri_t save = {.uri="/save", .method=HTTP_GET, .handler=SaveHandler, .user_ctx=nullptr};
+    httpd_uri_t save = {.uri="/save", .method=HTTP_POST, .handler=SaveHandler, .user_ctx=nullptr};
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &root));
     ESP_ERROR_CHECK(httpd_register_uri_handler(s_server, &save));
 
@@ -234,6 +281,7 @@ esp_err_t StartProvisioningAp()
 
 esp_err_t ConnectStation(const std::string& ssid, const std::string& password)
 {
+    s_provisioning_requested.store(false);
     wifi_config_t sta = {};
     std::strncpy(reinterpret_cast<char*>(sta.sta.ssid), ssid.c_str(), sizeof(sta.sta.ssid) - 1);
     std::strncpy(reinterpret_cast<char*>(sta.sta.password), password.c_str(),
@@ -292,11 +340,31 @@ esp_err_t Init()
     std::string ssid;
     std::string password;
     if (!LoadCredentials(&ssid, &password)) {
-        return StartProvisioningAp();
+        return StartProvisioning();
     }
     if (ConnectStation(ssid, password) == ESP_OK) {
         return ESP_OK;
     }
+    return StartProvisioning();
+}
+
+esp_err_t StartProvisioning()
+{
+    s_provisioning_requested.store(true);
+    s_retry_count = 0;
+    if (s_wifi_events) {
+        xEventGroupClearBits(s_wifi_events, kConnectedBit | kFailedBit);
+    }
+
+    if (s_server) {
+        httpd_stop(s_server);
+        s_server = nullptr;
+    }
+
+    // Safe whether Wi-Fi is connected, failed, or already stopped.
+    (void)esp_wifi_disconnect();
+    (void)esp_wifi_stop();
+
     return StartProvisioningAp();
 }
 
