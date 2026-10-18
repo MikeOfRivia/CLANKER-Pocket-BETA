@@ -295,12 +295,18 @@ extern "C" void app_main(void)
             while (true) vTaskDelay(pdMS_TO_TICKS(1000));
         }
 
-        if (s_power_short_pending.exchange(false)) {
-            ESP_LOGI(kTag, "Power key short press: power menu");
-            s_power_menu = true;
-            s_ui_menu = UiMenu::kNone;
-            RenderPowerMenu();
-            (void)s_panel->RefreshFastBase();
+        if (s_power_short_pending.exchange(false) &&
+            !s_power_long_pending.load()) {
+            ESP_LOGI(kTag, "Power key short press: enter sleep");
+            // Do not sleep during an active voice capture or request.
+            if (!s_recording && s_mic_state != MicState::kProcessing) {
+                s_power_menu = false;
+                s_ui_menu = UiMenu::kNone;
+                EnterIdleSleep();
+                last_activity_us = esp_timer_get_time();
+            } else {
+                ESP_LOGI(kTag, "Sleep deferred: audio/request active");
+            }
         }
 
         const int boot_now = gpio_get_level(kButtonBoot);
