@@ -1,4 +1,5 @@
 #include "nvs_flash.h"
+#include "esp_sleep.h"
 
 // Keep the current application implementation intact while replacing only the
 // top-level boot orchestration. This lets the boot behavior prove itself on
@@ -150,6 +151,34 @@ esp_err_t InitNvsForUi()
     return err;
 }
 
+constexpr int64_t kAutoSleepTimeoutUs = 15LL * 60LL * 1000000LL;
+
+void EnterIdleSleep()
+{
+    // GPIO5 is the radial SELECT button (active low), and an S3 RTC wake pin.
+    // Configure wake BEFORE replacing the visible page, so failure is harmless.
+    gpio_pullup_en(kButtonSelect);
+    esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
+    const esp_err_t wake_err = esp_sleep_enable_ext1_wakeup(
+        1ULL << static_cast<int>(kButtonSelect), ESP_EXT1_WAKEUP_ANY_LOW);
+    if (wake_err != ESP_OK) {
+        ESP_LOGE(kTag, "Cannot configure SELECT deep-sleep wake: %s",
+                 esp_err_to_name(wake_err));
+        return;
+    }
+    SaveUiState();
+    RenderSleeping();
+    if (s_panel->RefreshFullBase() != ESP_OK) {
+        ESP_LOGE(kTag, "Could not render sleep screen; staying awake");
+        RenderUi();
+        (void)s_panel->RefreshFastBase();
+        return;
+    }
+    if (s_codec) s_codec->Shutdown();
+    ESP_LOGI(kTag, "Entering deep sleep; press radial SELECT to wake");
+    esp_deep_sleep_start();
+}
+
 void StartNetworkInBackground()
 {
     const BaseType_t created = xTaskCreate(
@@ -187,10 +216,14 @@ extern "C" void app_main(void)
         return;
     }
 
-    RenderSplash();
-    if (s_panel->RefreshFullBase() != ESP_OK) {
-        ESP_LOGE(kTag, "Splash refresh failed");
-        return;
+    const bool nap_wakeup =
+        esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_EXT1;
+    if (!nap_wakeup) {
+        RenderSplash(0);
+        if (s_panel->RefreshFullBase() != ESP_OK) {
+            ESP_LOGE(kTag, "Splash refresh failed");
+            return;
+        }
     }
 
     // Do local state/SD preparation while the splash is already visible. The
@@ -200,17 +233,31 @@ extern "C" void app_main(void)
         ESP_LOGW(kTag, "NVS init returned: %s", esp_err_to_name(nvs_err));
     }
 
+    if (!nap_wakeup) {
+        RenderSplash(1);
+        RefreshUiPartial();
+    }
     const esp_err_t reader_err = beta_reader::Init();
     if (reader_err != ESP_OK) {
         ESP_LOGW(kTag, "Reader SD init returned: %s", esp_err_to_name(reader_err));
     }
     LoadUiState();
 
+    if (!nap_wakeup) {
+        RenderSplash(2);
+        RefreshUiPartial();
+    }
     if (InitAudio() != ESP_OK) {
         ESP_LOGE(kTag, "Audio init failed");
         return;
     }
-    PlayOwlBootTune();
+    if (!nap_wakeup) {
+        RenderSplash(3);
+        RefreshUiPartial();
+        PlayOwlBootTune();
+    } else {
+        ESP_LOGI(kTag, "Fast resume from deep sleep; skipping splash and boot tune");
+    }
 
     // Song ends -> UI immediately. Network association happens only after the
     // interactive surface is coming up and never gates boot anymore.
@@ -221,7 +268,10 @@ extern "C" void app_main(void)
     }
     StartNetworkInBackground();
 
-    std::array<int, 4> last = {1,1,1,1};
+    std::array<int, 4> last = {
+        gpio_get_level(kButtonBoot), gpio_get_level(kButtonUp),
+        gpio_get_level(kButtonSelect), gpio_get_level(kButtonDown)};
+    int64_t last_activity_us = esp_timer_get_time();
     int64_t boot_down_us = 0;
     int64_t select_down_us = 0;
     int64_t up_down_us = 0;
@@ -235,6 +285,7 @@ extern "C" void app_main(void)
         if (s_power_long_pending.exchange(false)) {
             ESP_LOGI(kTag, "Power key long press: clean shutdown");
             s_power_menu = false;
+            SaveUiState();
             RenderShuttingDown();
             (void)s_panel->RefreshFullBase();
             vTaskDelay(pdMS_TO_TICKS(500));
@@ -254,6 +305,17 @@ extern "C" void app_main(void)
 
         const int boot_now = gpio_get_level(kButtonBoot);
         const int select_now = gpio_get_level(kButtonSelect);
+        if (boot_now == 0 || select_now == 0 ||
+            gpio_get_level(kButtonUp) == 0 ||
+            gpio_get_level(kButtonDown) == 0 || s_recording ||
+            s_mic_state == MicState::kProcessing || s_power_menu) {
+            last_activity_us = esp_timer_get_time();
+        }
+        if (esp_timer_get_time() - last_activity_us >= kAutoSleepTimeoutUs) {
+            EnterIdleSleep();
+            // If wake configuration or display fails, don't spin on the error.
+            last_activity_us = esp_timer_get_time();
+        }
 
         if (last[0] == 1 && boot_now == 0) {
             boot_down_us = esp_timer_get_time();
