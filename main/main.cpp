@@ -353,17 +353,88 @@ void DrawDivider(uint8_t* fb, int y)
     FillRect(fb, 42, y, kPortraitWidth - 84, 3, true);
 }
 
-void RenderSplash()
+// Center bitmap text by actual glyph advance; reduce scale for long phrases.
+void DrawCenteredText(uint8_t* fb, int y, const char* message, int preferred_scale)
+{
+    const int length = static_cast<int>(std::strlen(message));
+    int scale = preferred_scale;
+    while (scale > 1 && length * 6 * scale > kPortraitWidth - 36) --scale;
+    DrawText(fb, (kPortraitWidth - length * 6 * scale) / 2, y, message, scale);
+}
+
+const char* BootPhrase(int stage)
+{
+    static const char* const pool[4][3] = {
+        {"WAKING UP...", "RUBBING MY EYES...", "BOOTING MY BRAIN..."},
+        {"GETTING DRESSED...", "BRUSHING MY TEETH...", "PUTTING ON MY HAT..."},
+        {"GRABBING BREAKFAST...", "FUELING UP...", "HAVING A QUICK BITE..."},
+        {"FINDING MY STUFF...", "PACKING MY BAG...", "ALMOST READY..."}
+    };
+    return pool[std::clamp(stage, 0, 3)][esp_random() % 3];
+}
+
+const char* NapPhrase()
+{
+    static const char* const lines[] = {
+        "CATCHING SOME Z'S...", "TAKING A NAP...", "DOZING OFF...",
+        "SNOOZING...", "RECHARGING...", "DREAMING IN BINARY...",
+        "NAP MODE ENGAGED..."
+    };
+    return lines[esp_random() % (sizeof(lines) / sizeof(lines[0]))];
+}
+
+enum class FaceState { kAwake, kSleep, kOff };
+
+void DrawPowerFace(uint8_t* fb, FaceState face, int y)
+{
+    const int x = (kPortraitWidth - kClankerHeadWidth) / 2;
+    DrawClankerHead(fb, x, y);
+    if (face == FaceState::kAwake) return;
+
+    // The stock head has white eyes cut out of a solid black face.
+    // Blacken only those eye apertures, then paint the new white features.
+    FillRect(fb, x + 44, y + 64, 31, 21, true);
+    FillRect(fb, x + 105, y + 64, 31, 21, true);
+    const int eyes[] = {57, 123};
+    for (int cx : eyes) {
+        if (face == FaceState::kSleep) {
+            FillRect(fb, x + cx - 10, y + 75, 20, 3, false);
+            FillRect(fb, x + cx - 12, y + 72, 3, 4, false);
+            FillRect(fb, x + cx + 9, y + 72, 3, 4, false);
+        } else {
+            // White X eyes, built from pixels so they match the original logo.
+            for (int d = -8; d <= 8; ++d) {
+                FillRect(fb, x + cx + d, y + 74 + d, 2, 2, false);
+                FillRect(fb, x + cx + d, y + 74 - d, 2, 2, false);
+            }
+        }
+    }
+    if (face == FaceState::kSleep) {
+        DrawText(fb, x + 184, y + 7, "Z", 3);
+        DrawText(fb, x + 203, y - 14, "Z", 2);
+        DrawText(fb, x + 220, y - 28, "Z", 2);
+    }
+}
+
+void RenderSplash(int stage = 0)
 {
     auto* fb = s_panel->framebuffer();
     s_panel->Clear(true);
-
-    DrawClankerHead(fb, (kPortraitWidth - kClankerHeadWidth) / 2, 105);
+    DrawPowerFace(fb, FaceState::kAwake, 105);
     DrawClankerWordmark(fb, (kPortraitWidth - kClankerWordmarkWidth) / 2, 270);
-
     DrawDivider(fb, 355);
-    DrawText(fb, 177, 405, "BETA", 4);
-    DrawText(fb, 102, 480, "POWERING UP!", 3);
+    DrawCenteredText(fb, 405, "BETA", 4);
+    DrawCenteredText(fb, 480, BootPhrase(stage), 3);
+}
+
+void RenderSleeping()
+{
+    auto* fb = s_panel->framebuffer();
+    s_panel->Clear(true);
+    DrawPowerFace(fb, FaceState::kSleep, 105);
+    DrawClankerWordmark(fb, (kPortraitWidth - kClankerWordmarkWidth) / 2, 270);
+    DrawDivider(fb, 355);
+    DrawCenteredText(fb, 430, NapPhrase(), 3);
 }
 
 void RenderHome()
@@ -475,12 +546,10 @@ void RenderShuttingDown()
     auto* fb = s_panel->framebuffer();
     s_panel->Clear(true);
 
-    DrawClankerHead(fb, (kPortraitWidth - kClankerHeadWidth) / 2, 90);
-    DrawClankerWordmark(fb, (kPortraitWidth - kClankerWordmarkWidth) / 2, 250);
-
-    DrawDivider(fb, 335);
-    DrawText(fb, 105, 390, "POWERED DOWN", 4);
-    DrawText(fb, 78, 465, "PRESS POWER TO REVIVE", 2);
+    DrawPowerFace(fb, FaceState::kOff, 105);
+    DrawClankerWordmark(fb, (kPortraitWidth - kClankerWordmarkWidth) / 2, 270);
+    DrawDivider(fb, 355);
+    DrawCenteredText(fb, 430, "POWERED DOWN", 4);
 }
 
 EpaperPanelConfig PanelConfig()
