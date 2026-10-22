@@ -155,17 +155,21 @@ constexpr int64_t kAutoSleepTimeoutUs = 15LL * 60LL * 1000000LL;
 
 void EnterIdleSleep()
 {
-    // GPIO5 is the radial SELECT button (active low), and an S3 RTC wake pin.
-    // Configure wake BEFORE replacing the visible page, so failure is harmless.
+    // Experiment: suspend in light sleep instead of rebooting from deep sleep.
+    // GPIO38 is the AXP2101 IRQ (POWER); GPIO5 is radial SELECT.
+    // Both GPIO wake sources are supported in ESP32-S3 light sleep.
     gpio_pullup_en(kButtonSelect);
-    esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
-    const esp_err_t wake_err = esp_sleep_enable_ext1_wakeup(
-        1ULL << static_cast<int>(kButtonSelect), ESP_EXT1_WAKEUP_ANY_LOW);
-    if (wake_err != ESP_OK) {
-        ESP_LOGE(kTag, "Cannot configure SELECT deep-sleep wake: %s",
-                 esp_err_to_name(wake_err));
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL));
+    const esp_err_t power_wake = gpio_wakeup_enable(GPIO_NUM_38, GPIO_INTR_LOW_LEVEL);
+    const esp_err_t select_wake = gpio_wakeup_enable(kButtonSelect, GPIO_INTR_LOW_LEVEL);
+    const esp_err_t gpio_wake = esp_sleep_enable_gpio_wakeup();
+    if (power_wake != ESP_OK || select_wake != ESP_OK || gpio_wake != ESP_OK) {
+        ESP_LOGE(kTag, "Light-sleep wake setup failed: power=%s select=%s gpio=%s",
+                 esp_err_to_name(power_wake), esp_err_to_name(select_wake),
+                 esp_err_to_name(gpio_wake));
         return;
     }
+
     SaveUiState();
     RenderSleeping();
     if (s_panel->RefreshFullBase() != ESP_OK) {
@@ -174,9 +178,38 @@ void EnterIdleSleep()
         (void)s_panel->RefreshFastBase();
         return;
     }
-    if (s_codec) s_codec->Shutdown();
-    ESP_LOGI(kTag, "Entering deep sleep; press radial SELECT to wake");
-    esp_deep_sleep_start();
+
+    // The POWER short-press IRQ that put us to sleep must be cleared first.
+    // Otherwise the PMIC's active-low interrupt would instantly wake us.
+    s_power_short_pending.store(false);
+    if (s_pmic) s_pmic->ClearIrqStatus();
+    vTaskDelay(pdMS_TO_TICKS(50));
+    if (gpio_get_level(GPIO_NUM_38) == 0 || gpio_get_level(kButtonSelect) == 0) {
+        ESP_LOGW(kTag, "Wake line already asserted; aborting light sleep");
+        RenderUi();
+        (void)s_panel->RefreshFastBase();
+        return;
+    }
+
+    ESP_LOGI(kTag, "Entering light sleep; POWER or SELECT wakes");
+    const int64_t sleep_start_us = esp_timer_get_time();
+    const esp_err_t sleep_err = esp_light_sleep_start();
+    const int64_t sleep_end_us = esp_timer_get_time();
+    ESP_LOGI(kTag, "Light sleep returned: %s, cause=%d, elapsed=%lld ms",
+             esp_err_to_name(sleep_err),
+             static_cast<int>(esp_sleep_get_wakeup_cause()),
+             static_cast<long long>((sleep_end_us - sleep_start_us) / 1000));
+
+    // Consume the wake button event. This press should wake, not re-sleep.
+    if (s_pmic) s_pmic->ClearIrqStatus();
+    s_power_short_pending.store(false);
+    if (sleep_err != ESP_OK) {
+        ESP_LOGW(kTag, "Light sleep unsuccessful; restoring UI");
+    }
+    RenderUi();
+    (void)s_panel->RefreshFastBase();
+    s_power_short_pending.store(false);
+    ESP_LOGI(kTag, "Light sleep UI restored");
 }
 
 void StartNetworkInBackground()
