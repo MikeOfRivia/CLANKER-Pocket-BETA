@@ -2,7 +2,7 @@ name: Build CLANKER Pocket BETA
 
 on:
   push:
-    branches: [ main, feature/chat-read-ui, feature/power-states ]
+    branches: [ main, feature/chat-read-ui, feature/power-states, experiment/power-light-sleep-2026-10-22 ]
   workflow_dispatch:
 
 jobs:
