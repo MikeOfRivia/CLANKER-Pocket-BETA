@@ -1,5 +1,6 @@
 #include "nvs_flash.h"
 #include "esp_sleep.h"
+#include "esp_system.h"
 
 // Keep the current application implementation intact while replacing only the
 // top-level boot orchestration. This lets the boot behavior prove itself on
@@ -191,6 +192,8 @@ void EnterIdleSleep()
         return;
     }
 
+    ESP_LOGW(kTag, "DIAG SLEEP: entering light sleep GPIO38=%d SELECT=%d",
+             gpio_get_level(GPIO_NUM_38), gpio_get_level(kButtonSelect));
     ESP_LOGI(kTag, "Entering light sleep; POWER or SELECT wakes");
     const int64_t sleep_start_us = esp_timer_get_time();
     const esp_err_t sleep_err = esp_light_sleep_start();
@@ -209,6 +212,8 @@ void EnterIdleSleep()
     RenderUi();
     (void)s_panel->RefreshFastBase();
     s_power_short_pending.store(false);
+    ESP_LOGW(kTag, "DIAG RESUME: returned to existing app (no reboot), wake_cause=%d",
+             static_cast<int>(esp_sleep_get_wakeup_cause()));
     ESP_LOGI(kTag, "Light sleep UI restored");
 }
 
@@ -236,6 +241,9 @@ void StartNetworkInBackground()
 
 extern "C" void app_main(void)
 {
+    ESP_LOGW(kTag, "DIAG BOOT: app_main entered reset_reason=%d wake_cause=%d",
+             static_cast<int>(esp_reset_reason()),
+             static_cast<int>(esp_sleep_get_wakeup_cause()));
     ESP_LOGI(kTag, "CLANKER Pocket fast boot");
 
     if (InitPower() != ESP_OK || InitButtons() != ESP_OK) {
