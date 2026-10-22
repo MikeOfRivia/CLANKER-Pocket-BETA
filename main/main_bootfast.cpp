@@ -154,6 +154,27 @@ esp_err_t InitNvsForUi()
 
 constexpr int64_t kAutoSleepTimeoutUs = 15LL * 60LL * 1000000LL;
 
+void ShowWakeDiagnostic(const char* result, int detail, int wake_cause)
+{
+    auto* fb = s_panel->framebuffer();
+    s_panel->Clear(true);
+    DrawText(fb, 28, 85, "POWER DIAGNOSTIC", 3);
+    DrawDivider(fb, 160);
+    DrawText(fb, 28, 220, result, 3);
+    char line[64] = {};
+    std::snprintf(line, sizeof(line), "DETAIL: %d", detail);
+    DrawText(fb, 28, 315, line, 2);
+    std::snprintf(line, sizeof(line), "WAKE CAUSE: %d", wake_cause);
+    DrawText(fb, 28, 365, line, 2);
+    DrawText(fb, 28, 475, "PHOTO THIS SCREEN", 2);
+    DrawText(fb, 28, 540, "UI RETURNS IN 5 SEC", 2);
+    if (s_panel->RefreshFullBase() != ESP_OK) {
+        ESP_LOGE(kTag, "On-screen diagnostic refresh failed");
+    }
+    vTaskDelay(pdMS_TO_TICKS(5000));
+}
+
+
 void EnterIdleSleep()
 {
     // Experiment: suspend in light sleep instead of rebooting from deep sleep.
@@ -209,6 +230,8 @@ void EnterIdleSleep()
     if (sleep_err != ESP_OK) {
         ESP_LOGW(kTag, "Light sleep unsuccessful; restoring UI");
     }
+    ShowWakeDiagnostic("LIGHT SLEEP RESUME", static_cast<int>(sleep_err),
+                       static_cast<int>(esp_sleep_get_wakeup_cause()));
     RenderUi();
     (void)s_panel->RefreshFastBase();
     s_power_short_pending.store(false);
@@ -302,6 +325,8 @@ extern "C" void app_main(void)
 
     // Song ends -> UI immediately. Network association happens only after the
     // interactive surface is coming up and never gates boot anymore.
+    ShowWakeDiagnostic("NEW BOOT", static_cast<int>(esp_reset_reason()),
+                       static_cast<int>(esp_sleep_get_wakeup_cause()));
     RenderUi();
     if (s_panel->RefreshFastBase() != ESP_OK) {
         ESP_LOGE(kTag, "Initial UI refresh failed");
